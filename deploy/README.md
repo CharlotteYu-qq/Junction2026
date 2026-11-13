@@ -34,6 +34,21 @@ It also turns on the firewall (only SSH and HTTP open) and prints the URL plus t
 
 To update later, commit your changes and run the same command again. Data and orders on the server are kept.
 
+## HTTPS on a name (optional, free)
+
+[sslip.io](https://sslip.io) turns any name that contains the IP into that IP, so no domain purchase is needed:
+
+```bash
+DOMAIN=aimo.135-181-63-188.sslip.io bash deploy/deploy.sh 135.181.63.188
+```
+
+This installs Caddy, which gets a free Let's Encrypt certificate and renews it automatically. The app then only
+listens on `127.0.0.1:8000`, and plain `http://<IP>` redirects to the HTTPS name. The domain is remembered on the
+server, so later deploys don't need `DOMAIN=` again. A real domain works the same way: point an A record at the IP
+and pass that name instead.
+
+Current deployment: **https://aimo.135-181-63-188.sslip.io** (login: user `aimo`, password in the team chat).
+
 ## Useful commands on the server
 
 ```bash
@@ -49,5 +64,5 @@ To change the password, edit `DEMO_PASSWORD` in `/opt/aimo-gateway/.env` and run
 
 - The whole site asks for the login (HTTP Basic auth) because it has no user accounts yet.
   `/api/health` and `/.well-known/aimo-agent-gateway.json` stay open.
-- It's plain HTTP on the IP address. HTTPS needs a domain name (or an `<ip>.sslip.io` name) and a reverse proxy such as Caddy.
+- Without `DOMAIN` it's plain HTTP on the IP address (see the HTTPS section above).
 - **Delete the instance after Junction.** An on-demand instance keeps costing money until it is deleted.

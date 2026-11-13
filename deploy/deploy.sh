@@ -2,6 +2,7 @@
 # Deploy (or update) the last commit to a server over SSH. Run from the repo, in Git Bash / macOS / Linux:
 #
 #   bash deploy/deploy.sh <server-ip> [path/to/ssh-key]
+#   DOMAIN=aimo.<ip-with-dashes>.sslip.io bash deploy/deploy.sh <server-ip>   # HTTPS on a name (remembered)
 #
 # The repo is private, so the code is uploaded with `git archive` instead of cloned on the server.
 # Only AIMO_API_KEY, AIMO_API_BASE_URL and ANTHROPIC_API_KEY are copied from your local .env (over SSH).
@@ -9,8 +10,14 @@ set -euo pipefail
 
 HOST="${1:?usage: bash deploy/deploy.sh <server-ip> [path/to/ssh-key]}"
 KEY="${2:-$HOME/.ssh/id_ed25519_verda}"
+DOMAIN="${DOMAIN:-}"
 APP_DIR=/opt/aimo-gateway
 SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "root@$HOST")
+
+if [ -n "$DOMAIN" ] && ! [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+  echo "DOMAIN looks wrong: $DOMAIN" >&2
+  exit 1
+fi
 
 cd "$(git rev-parse --show-toplevel)"
 if [ ! -f .env ]; then
@@ -31,8 +38,10 @@ if ! "${SSH[@]}" "test -f $APP_DIR/.env"; then
 fi
 
 echo "==> Running setup on the server"
-"${SSH[@]}" "bash $APP_DIR/deploy/setup.sh"
+"${SSH[@]}" "DOMAIN='$DOMAIN' bash $APP_DIR/deploy/setup.sh"
 
+conf="$("${SSH[@]}" "grep -E '^(DOMAIN|DEMO_USER|DEMO_PASSWORD)=' $APP_DIR/.env")"
+site_domain="$(printf '%s\n' "$conf" | sed -n 's/^DOMAIN=//p' | tail -n1)"
 echo
-echo "Site:  http://$HOST/"
-"${SSH[@]}" "grep -E '^DEMO_(USER|PASSWORD)=' $APP_DIR/.env" | sed 's/^DEMO_USER=/Login: /; s/^DEMO_PASSWORD=/Password: /'
+if [ -n "$site_domain" ]; then echo "Site:     https://$site_domain/"; else echo "Site:     http://$HOST/"; fi
+printf '%s\n' "$conf" | sed -n 's/^DEMO_USER=/Login:    /p; s/^DEMO_PASSWORD=/Password: /p'
