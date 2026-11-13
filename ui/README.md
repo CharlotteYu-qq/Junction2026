@@ -8,6 +8,18 @@
 - **Audit timeline:** a readable record of what the agent did and why. There is a buyer view (own orders) and a Valio Aimo view (all agents).
 - Uses the gateway and trust REST endpoints only.
 
+## Files (MVP)
+
+Plain HTML/CSS/JS modules, with no build step. FastAPI serves them at `/`.
+
+| File | What it does |
+|---|---|
+| `index.html` | The five pages: Order, Review queue, Customers, Audit trail, Explore |
+| `app.js` | Page logic and API calls |
+| `charts.js` | Ranked bar list (selected option emphasised, tooltips, keyboard support), status chips |
+| `dom.js` | Safe DOM builder (text only through `textContent`) and formatting helpers |
+| `styles.css` | Valio Aimo portal colours, responsive down to phone width |
+
 ## Run
 
-*TBD when the code lands.*
+See [Run the MVP locally](../README.md#run-the-mvp-locally) in the main README.

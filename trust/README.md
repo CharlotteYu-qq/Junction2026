@@ -12,6 +12,16 @@
 
 Kept as a library that `gateway/` calls, so it can be unit-tested without the backend.
 
+## Files (MVP)
+
+| File | What it does |
+|---|---|
+| `customers.py` | Whitelist & trust tiers, Y-tunnus checksum, demo customers |
+| `policy.py` | `evaluate()` → auto_approve / needs_approval / reject, with every check explained; `constraint_check()` for allergens and preferences |
+| `signing.py` | Ed25519 key, offer hashing and verification |
+| `audit.py` | Append-only, hash-chained audit log + `verify()` |
+| `storage.py` | Tiny JSON persistence |
+
 ## Run
 
-*TBD when the code lands.*
+See [Run the MVP locally](../README.md#run-the-mvp-locally) in the main README.

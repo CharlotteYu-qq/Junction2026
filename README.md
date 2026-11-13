@@ -2,7 +2,28 @@
 
 > **Junction 2026 · Valio Aimo challenge.** Our goal is to let autonomous purchasing agents find products, compare offers and place orders with a food-service wholesaler in minutes, while keeping real systems, confidential data and humans' authority protected.
 
-📋 **Progress tracker: [PLAN.md](PLAN.md)**
+📋 **Progress tracker: [PLAN.md](PLAN.md)** · 🔌 **API notes: [docs/mock-api-notes.md](docs/mock-api-notes.md)**
+
+## Run the MVP locally
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env               # Windows: copy .env.example .env, then add the Valio API key (team chat)
+python scripts/download_data.py    # ~90 MB of challenge data into data/valio/ (git-ignored)
+python -m uvicorn gateway.app:app --reload --port 8000
+```
+
+Open <http://127.0.0.1:8000>. The API docs are at <http://127.0.0.1:8000/docs>. The first start builds a slim catalog index, which takes a few seconds.
+
+| Page | What it shows |
+|---|---|
+| **Order** | Type a need in plain words (English or basic Finnish). The agent shows what it understood (you can edit it), the steps it ran, ranked options per item with live prices and stock, and the decision: placed automatically, sent for approval, or blocked |
+| **Review queue** | Orders that need a person, each with the reasons, the order lines, the request and the agent's rationale. Approving can also verify a new customer |
+| **Customers** | The whitelist: trust status, Y-tunnus checksum, auto-approval limit and hard allergen rules. You can register a new customer |
+| **Audit trail** | Every step by the customer, agent, policy and people, in plain language and hash-chained |
+| **Explore** | Catalog explorer with label/diet filters and a carbon-footprint-by-product-group chart that you can click to filter |
+
+Use the example buttons on the Order page for the demo scenarios. **Reset demo data** is in the footer.
 
 ---
 
@@ -86,32 +107,35 @@ sequenceDiagram
     Note over G: every step is written to the hash-chained audit log
 ```
 
-## Agent interface (draft)
+## Agent interface (MVP: REST, OpenAPI at `/docs`)
 
-The source of truth is [contracts/](contracts/). This table is the starting point.
+The data models live in [contracts/models.py](contracts/models.py).
 
-| Tool (MCP) / endpoint (REST) | Purpose | Scope |
-|---|---|---|
-| `get_mandate` | Shows what this agent may do, so it can plan within its limits | Core |
-| `search_products` | Text search plus filters (category, labels, allergens, pack size) | Core |
-| `get_product` | Product details, certificates, allergens, lead time | Core |
-| `request_offer` | Price and availability for given lines and a delivery date. Returns a **signed fixed-price offer** valid until a set time | Core |
-| `place_order` | Commits an offer. Returns `placed`, `pending_approval` or `rejected`, with reasons | Core |
-| `get_order_status` | Status of an order or approval | Core |
-| `suggest_substitutes` | Good, better and best alternatives within the assortment when the request can't be fully met | Optional |
-| `compare_options` | Delivery reliability and sustainability labels alongside price | Optional |
-| `get_audit_trail` | Readable log of what the agent did and why | Optional |
+| Endpoint | Purpose |
+|---|---|
+| `GET /.well-known/aimo-agent-gateway.json` | Discovery for agents: flow, offer-signing public key, data boundary |
+| `POST /api/requests` | Natural-language need → parsed intent → catalog search → Valio price & availability → **signed fixed-price offer** + policy preview |
+| `POST /api/offers/{id}/evaluate` | Preview the decision for a different selection (nothing is placed) |
+| `POST /api/orders` | Commit an offer → `placed` / `pending_approval` / `rejected`, with every check explained |
+| `POST /api/orders/{id}/decision` | A person approves or rejects, and can verify a new customer |
+| `GET /api/audit` | The hash-chained, readable audit trail and the chain verification |
+| `GET /api/catalog/search`, `POST /api/catalog/quote` | Explore static data; live price and stock only for hand-picked products |
+| `GET/POST /api/customers` | Whitelist / trust registry |
 
-## Guardrails model (draft)
+Next step: expose the same operations as **MCP tools**, so LLM agents can call them directly.
+
+## Guardrails model (implemented in [trust/policy.py](trust/policy.py))
 
 | Situation | Decision |
 |---|---|
-| Order total within the auto limit, and all items match preferences | ✅ Agent decides alone |
-| Total above the auto limit, or weekly budget exceeded | 🧑 Human approval |
-| Substitute outside stated preferences (label, brand, pack size, price change) | 🧑 Human approval |
-| Delivery later than the requested date, or only part of the quantity available | 🧑 Human approval |
-| Allergen or dietary rule violated (e.g. school or hospital kitchen) | ⛔ Rejected (hard rule) |
-| Offer expired or signature invalid | ⛔ Rejected |
+| Customer on the whitelist, total within its auto-approval limit, everything available on time and matching the request | ✅ Placed automatically |
+| New customer (not on the whitelist) | 🧑 Person approves, and can verify the customer at the same time |
+| Total above the auto-approval limit, or more than 3× the customer's average order | 🧑 Person approves |
+| Not enough stock, a later delivery date, or the order cut-off has passed | 🧑 Person approves |
+| Substitute that doesn't match the request (e.g. not lactose-free) | 🧑 Person approves |
+| No allergen data for a customer with a strict allergen rule | 🧑 Person approves |
+| Product contains or may contain an allergen the customer never accepts | ⛔ Excluded / rejected (hard rule) |
+| Offer expired or signature mismatch | ⛔ Rejected |
 
 ## What stays private
 
@@ -121,33 +145,33 @@ The gateway exposes only selected data. It never exposes purchase prices, margin
 
 ```
 .
-├── contracts/   shared data models & interface spec  (everyone, changes via PR)
-├── gateway/     agent interface, mock-backend client, offers, orders   — Member A
-├── trust/       mandates, policy engine, approvals, signing, audit     — Member B
-├── agent/       demo buyer agent + scenarios                           — Member C
-├── ui/          approval & audit dashboard                             — Member C
+├── contracts/   shared data models & vocabulary  (everyone, changes via PR)
+├── gateway/     FastAPI app, catalog search, Valio API client, offer planner, orders   — Member A
+├── trust/       whitelist, policy engine, signing, hash-chained audit log               — Member B
+├── agent/       natural language → structured intent (rules + optional Claude)          — Member C
+├── ui/          web UI: plain HTML/CSS/JS, no build step                                — Member C
+├── scripts/     download_data.py
 ├── docs/        mock-API notes, decisions, pitch material
-└── data/        local copies of challenge datasets (git-ignored)
+└── data/        challenge datasets + runtime state (git-ignored)
 ```
 
-## Tech stack (proposed, to confirm at kickoff)
+## Tech stack (MVP)
 
 - **Backend:** Python 3.12, FastAPI, Pydantic v2. The models in `contracts/` also give us the OpenAPI spec.
-- **Agent interface:** MCP Python SDK exposes the same tools as the REST API.
-- **Storage:** SQLite for offers, orders, approvals and the audit log.
-- **Trust:** Ed25519 signatures (the `cryptography` package) and a public key at `/.well-known/`.
-- **Demo buyer agent:** Anthropic Python SDK with tool use, model `claude-opus-5-5`.
-- **UI:** React + Vite, or Streamlit if time is short.
+- **Storage:** JSON files in `data/runtime/` (to be replaced by SQLite).
+- **Trust:** Ed25519-signed offers (the `cryptography` package), public key at `/.well-known/`, and a SHA-256 hash-chained audit log.
+- **Language understanding:** a rule-based parser (English + basic Finnish) that always works. If `ANTHROPIC_API_KEY` is set, the Claude parser (`claude-opus-5-5`, structured outputs) is used instead, falling back to the rules.
+- **UI:** vanilla JS modules, no build step. Colours follow the Valio Aimo portal theme.
+- **Next:** an MCP server over the same operations, SQLite, and a PRH/YTJ business-ID lookup.
 
 ## Getting started
 
 ```bash
-git clone <repo-url>
-cd <repo>
-cp .env.example .env     # fill in the keys (shared in team chat, never commit them)
+git clone https://github.com/Dadaist-chn/Junction2026.git   # into a folder outside OneDrive/Dropbox
+cd Junction2026
 ```
 
-Setup for each module is in that folder's README. Run commands will be added when the code lands.
+Then follow [Run the MVP locally](#run-the-mvp-locally) above. Each module's folder has a README listing its files.
 
 ## Team
 

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aimo Agent Gateway</title>
+  <meta name="description" content="Junction 2026 prototype: an interface through which purchasing agents and people order from Valio Aimo, with guardrails, human approval and an audit trail.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23005670'/%3E%3Cpath d='M9 22 16 9l7 13' stroke='%23c0e021' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="top-ribbon">
+    <div class="container ribbon-inner">
+      <span>Junction 2026 prototype · Valio Aimo challenge · synthetic data only</span>
+      <span id="api-status" class="ribbon-status">Connecting…</span>
+    </div>
+  </div>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="#order" aria-label="Aimo Agent Gateway home">
+        <span class="brand-word">Aimo</span><span class="brand-tag">Agent Gateway</span>
+      </a>
+      <nav class="main-nav" aria-label="Main">
+        <a href="#order" data-page="order">Order</a>
+        <a href="#review" data-page="review">Review queue <span class="nav-count" id="nav-review-count" hidden></span></a>
+        <a href="#customers" data-page="customers">Customers</a>
+        <a href="#audit" data-page="audit">Audit trail</a>
+        <a href="#explore" data-page="explore">Explore</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- ======================================================= ORDER -->
+    <section id="page-order" class="page">
+      <div class="hero">
+        <div class="container">
+          <p class="eyebrow">Order assistant</p>
+          <h1>What does your kitchen need?</h1>
+          <p class="lead">Describe it in your own words. The agent turns it into concrete order lines, checks live prices and
+            availability with Valio Aimo, and then either places the order within your authority or hands it to a person.</p>
+        </div>
+      </div>
+      <div class="container">
+        <form id="request-form" class="panel request-panel" novalidate>
+          <div class="form-row">
+            <div class="field field-customer">
+              <label for="customer">Ordering as</label>
+              <select id="customer"></select>
+            </div>
+            <div id="trust-card" class="trust-card" aria-live="polite"></div>
+          </div>
+          <div class="field">
+            <label for="request-text">Your request</label>
+            <textarea id="request-text" rows="3" placeholder="e.g. I need 1,000 litres of lactose-free milk by Monday"></textarea>
+          </div>
+          <div class="examples" id="examples" aria-label="Example requests"></div>
+          <div class="form-actions">
+            <button class="btn btn-primary" type="submit" id="run-btn">Find the best option</button>
+            <span id="run-status" class="run-status" aria-live="polite"></span>
+          </div>
+        </form>
+        <div id="results" class="results" hidden></div>
+      </div>
+    </section>
+
+    <!-- ======================================================= REVIEW -->
+    <section id="page-review" class="page" hidden>
+      <div class="hero hero-compact">
+        <div class="container">
+          <p class="eyebrow">Human in the loop</p>
+          <h1>Review queue</h1>
+          <p class="lead">Orders the agent was not allowed to place on its own. Each card says exactly why.</p>
+        </div>
+      </div>
+      <div class="container">
+        <div class="toolbar">
+          <label class="field-inline" for="reviewer">Reviewing as
+            <input id="reviewer" type="text" placeholder="Your name" autocomplete="name">
+          </label>
+        </div>
+        <div id="review-list" class="stack"></div>
+        <h2 class="section-title">Recently decided</h2>
+        <div id="review-done"></div>
+      </div>
+    </section>
+
+    <!-- ======================================================= CUSTOMERS -->
+    <section id="page-customers" class="page" hidden>
+      <div class="hero hero-compact">
+        <div class="container">
+          <p class="eyebrow">Trust</p>
+          <h1>Customers &amp; whitelist</h1>
+          <p class="lead">Returning customers are on the whitelist and may get orders approved automatically up to a limit.
+            New customers are reviewed by a person until someone verifies the business.</p>
+        </div>
+      </div>
+      <div class="container">
+        <div id="customer-table"></div>
+        <div class="two-col">
+          <form id="register-form" class="panel" novalidate>
+            <h3>Register a new customer</h3>
+            <div class="field"><label for="reg-name">Business name</label><input id="reg-name" type="text" required maxlength="120"></div>
+            <div class="field"><label for="reg-segment">Type</label>
+              <select id="reg-segment">
+                <option>restaurant</option><option>hotel</option><option>school kitchen</option>
+                <option>hospital kitchen</option><option>catering</option><option>café</option>
+              </select>
+            </div>
+            <div class="field"><label for="reg-bid">Business ID (Y-tunnus)</label>
+              <input id="reg-bid" type="text" placeholder="1234567-8" maxlength="9" inputmode="numeric">
+              <span id="reg-bid-hint" class="hint" aria-live="polite"></span>
+            </div>
+            <button class="btn btn-primary btn-small" type="submit">Register</button>
+            <span id="reg-status" class="run-status" aria-live="polite"></span>
+          </form>
+          <div class="panel panel-note">
+            <h3>How trust is decided</h3>
+            <ul class="plain-list">
+              <li><strong>Whitelist:</strong> a customer who has bought before and was verified. Orders within its auto-approval limit are placed without a person.</li>
+              <li><strong>New customer:</strong> every order goes to the review queue. Approving it can also verify the customer.</li>
+              <li><strong>Business ID:</strong> checked with the Y-tunnus checksum today. Next step: look it up in the Finnish Trade Register (PRH open data). That's more reliable than scraping personal data from the web, and GDPR-friendly.</li>
+              <li><strong>Hard rules</strong> (allergens) are never overridden, even for trusted customers.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================= AUDIT -->
+    <section id="page-audit" class="page" hidden>
+      <div class="hero hero-compact">
+        <div class="container">
+          <p class="eyebrow">Traceability</p>
+          <h1>Audit trail</h1>
+          <p class="lead">Every step the agent, the policy and people took, in plain language. Each entry is chained to the
+            previous one by its hash, so the record can't be edited silently.</p>
+        </div>
+      </div>
+      <div class="container">
+        <div class="toolbar" id="audit-toolbar"></div>
+        <ol id="audit-list" class="timeline"></ol>
+      </div>
+    </section>
+
+    <!-- ======================================================= EXPLORE -->
+    <section id="page-explore" class="page" hidden>
+      <div class="hero hero-compact">
+        <div class="container">
+          <p class="eyebrow">Assortment</p>
+          <h1>Explore the catalog</h1>
+          <p class="lead">See what exists before you order: how many options match, which ones carry the labels you care
+            about, and how product groups compare on carbon footprint.</p>
+        </div>
+      </div>
+      <div class="container">
+        <form id="explore-form" class="filter-row" novalidate>
+          <input id="explore-q" type="search" placeholder="Search, e.g. burger, milk, salmon, potatoes" aria-label="Search products" value="burger">
+          <div id="explore-facets" class="facet-chips" role="group" aria-label="Filters"></div>
+          <label class="field-inline date-inline" for="explore-date">Price date <input id="explore-date" type="date"></label>
+          <button class="btn btn-primary btn-small" type="submit">Search</button>
+        </form>
+        <div id="explore-body"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <span>Aimo Agent Gateway · Junction 2026 prototype</span>
+      <nav class="footer-nav" aria-label="Footer">
+        <a href="/docs" target="_blank" rel="noopener">API docs</a>
+        <a href="/.well-known/aimo-agent-gateway.json" target="_blank" rel="noopener">Agent discovery</a>
+        <button type="button" class="link-button" id="reset-demo">Reset demo data</button>
+      </nav>
+    </div>
+  </footer>
+
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
