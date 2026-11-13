@@ -1,5 +1,60 @@
 # Plan & Progress Tracker
 
+## 🚦 Git quick guide (read this first)
+
+**How we work:** each person develops on their own branch `<name>/dev`. Merge into `main` **at least 3× a day**, every time a small piece runs. Never go a whole day without merging; late merges are where conflicts and interface mismatches pile up.
+
+### One-time setup
+
+1. Clone into a folder **outside OneDrive / Dropbox** (sync tools can corrupt `.git`): VS Code → `Ctrl+Shift+P` → `Git: Clone` → `https://github.com/Dadaist-chn/Junction2026.git`
+2. In the VS Code terminal, inside the repo:
+   ```bash
+   git config --global user.name "Your Name"
+   git config --global user.email "your-github-email"
+   git config pull.rebase true
+   git config rebase.autoStash true
+   ```
+3. VS Code settings → turn on **Git: Autofetch**.
+4. Create your branch: click the branch name in the bottom-left → **Create new branch…** → `<name>/dev` → **Publish Branch**.
+5. Copy `.env.example` to `.env` and fill in the keys from the team chat.
+
+### Every work session (VS Code Source Control)
+
+| # | Step | How |
+|---|---|---|
+| 1 | Check your branch | Bottom-left must show `<name>/dev`, **not** `main` |
+| 2 | Bring in teammates' work | `…` → Pull, Push → **Fetch**, then `…` → Branch → **Merge Branch…** → `origin/main` |
+| 3 | Stage only your files | Click **+** next to your own files (avoid "Stage All") |
+| 4 | Commit | Message like `gateway: add search_products` → **Commit** |
+| 5 | Push to your branch | **Sync Changes** |
+
+### Merge into `main` (whenever a small feature runs)
+
+1. Do step 2 above, check that everything still runs, then **Sync Changes**.
+2. On GitHub: **Compare & pull request** → base `main` ← compare `<name>/dev` → **Create pull request**.
+3. **Merge pull request** using **Create a merge commit**. ⚠️ Not "Squash and merge". ⚠️ **Don't delete** your branch afterwards; you keep using it.
+4. Post in the team chat: "merged X into main".
+
+### Am I in sync with `main`?
+
+```bash
+git fetch
+git rev-list --left-right --count origin/main...HEAD
+```
+
+The output is `X  Y`. **X** is the number of commits on `main` that you don't have (merge `origin/main` in). **Y** is the number of your commits not yet in `main` (open a PR). `0  0` means you're in sync.
+The ↓↑ numbers in VS Code's status bar compare with **your own branch on GitHub**, not with `main`.
+
+### Rules
+
+- ✋ **Only edit your own folder.** For `contracts/`, dependency files and the README, post in the chat before you push.
+- 🔑 **Never commit** `.env`, API keys or `data/`. Check the file list before each commit. A secret that has been pushed stays in the history, so if it happens, tell the team immediately.
+- ✅ **Only merge code that runs.** Tag a working demo with `git tag demo-v1`, then `git push --tags`.
+- 🚫 **Never** `git push --force`. **Never** delete a personal branch after a PR.
+- 💥 **Conflict?** Open the red file and choose *Accept Current / Incoming / Both*, then commit. If the conflict is in a teammate's code, ask them. If you're lost, run `git merge --abort`.
+
+---
+
 **Status:** ⬜ todo · 🟨 in progress · ✅ done · ❌ dropped
 
 **How we use this file:** each person updates their own section in their own PRs: tick boxes, add 🟨, and link a GitHub Issue if a task grows. Read it at every sync. It is our single source of truth.
@@ -119,8 +174,8 @@
 
 ## Working agreement
 
-- `main` must always run. Work on branches named `<name>/<short-topic>`.
+- Git workflow: see the **Git quick guide** at the top of this file. `main` must always run.
 - Keep PRs small, and have one other person take a quick look. Changes to `contracts/` need a 👍 from **both** others.
-- **Never commit secrets.** `.env` is git-ignored. Share keys only in the team chat.
+- Share keys only in the team chat, never in the repo.
 - Sync every ~4 h (10 min max): what's done, what's next, what's blocking. Update this file at each sync.
 - If you're stuck for 30+ minutes, say so in the chat.
