@@ -25,6 +25,8 @@ Open <http://127.0.0.1:8000>. The API docs are at <http://127.0.0.1:8000/docs>. 
 
 Use the example buttons on the Order page for the demo scenarios. **Reset demo data** is in the footer.
 
+**Deploying** to a Verda CPU instance takes one script: see [deploy/README.md](deploy/README.md).
+
 ---
 
 ## The problem

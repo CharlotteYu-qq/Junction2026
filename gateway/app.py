@@ -4,6 +4,8 @@ Run from the repo root:   python -m uvicorn gateway.app:app --reload --port 8000
 """
 from __future__ import annotations
 
+import base64
+import secrets
 import statistics
 import time
 from collections import defaultdict
@@ -12,7 +14,8 @@ from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -63,6 +66,32 @@ app = FastAPI(
         "to a human for approval. Synthetic data only."
     ),
 )
+
+
+# ----------------------------------------------------------------------------- site password (public deployments)
+
+OPEN_PATHS = ("/api/health", "/.well-known/")
+
+
+def _authorised(header: str) -> bool:
+    if not header.lower().startswith("basic "):
+        return False
+    try:
+        user, _, password = base64.b64decode(header[6:]).decode().partition(":")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return secrets.compare_digest(user.encode(), settings.demo_user.encode()) and secrets.compare_digest(
+        password.encode(), settings.demo_password.encode()
+    )
+
+
+@app.middleware("http")
+async def demo_password(request: Request, call_next):
+    """HTTP Basic auth for the whole site when DEMO_PASSWORD is set; off for local development."""
+    if settings.demo_password and not request.url.path.startswith(OPEN_PATHS):
+        if not _authorised(request.headers.get("authorization", "")):
+            return Response("Login required", status_code=401, headers={"WWW-Authenticate": 'Basic realm="Aimo Agent Gateway"'})
+    return await call_next(request)
 
 
 # ----------------------------------------------------------------------------- helpers

@@ -6,6 +6,7 @@ parse -> search catalog -> get prices -> check availability -> rank -> sign.
 from __future__ import annotations
 
 import math
+import re
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -55,6 +56,8 @@ def describe_item(item: RequestItem) -> str:
 def _parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
+    # The API sends offsets like +0200; Python < 3.11 only parses +02:00
+    value = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", value.strip())
     try:
         return datetime.fromisoformat(value)
     except ValueError:
