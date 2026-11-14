@@ -9,6 +9,9 @@
 data/*
 !data/README.md
 
+# Pitch material (kept local, not published)
+docs/pitch/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -1,5 +1,5 @@
 import { $, fmt, h, localISO, plural, storage } from './dom.js';
-import { barList, hideTip, toneChip } from './charts.js';
+import { barList, hideTip, statusChip, toneChip } from './charts.js';
 
 // ====================================================================== state & api
 const S = {
