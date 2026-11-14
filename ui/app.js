@@ -8,7 +8,7 @@ const S = {
   customers: [],
   // The conversation with the agent: { role: 'buyer' | 'agent', text }. Messages before `from` belong to an
   // order that is done; `aside` marks the cancellation exchange. Neither is sent to the agent again.
-  chat: { messages: [], understood: null, from: 0 },
+  chat: { messages: [], understood: null, from: 0, afterOrder: null }, // afterOrder: the order this conversation follows
   pendingCancel: null, // { order, reason }: the agent asked the buyer to confirm cancelling this order
   detailsOpen: false, // the buyer opened "what the agent understood / how it worked"
   notice: null, // reminder to double-check, when the rule-based fallback understood the request
@@ -347,9 +347,11 @@ async function sendMessage({ skip = false } = {}) {
     S.pendingReminder = null;
   }
   S.pendingCancel = null; // anything else the buyer says leaves the cancellation unanswered
-  if (!skip && S.submitted && S.chat.from < S.chat.messages.length) {
-    S.chat.from = S.chat.messages.length; // that order is done: this message starts a new one
+  if (!skip && S.submitted && S.chat.afterOrder !== S.submitted.id) {
+    // That order is done: this message starts a new conversation (once; later turns keep its history).
+    S.chat.from = S.chat.messages.length;
     S.chat.understood = null;
+    S.chat.afterOrder = S.submitted.id;
   }
   if (!skip) {
     S.chat.messages.push({ role: 'buyer', text });
@@ -1092,7 +1094,7 @@ function newRequest({ focus = true } = {}) {
   S.requestVersion += 1;
   S.evaluationVersion += 1;
   Object.assign(S, { offer: null, decision: null, edit: null, submitted: null, selections: {}, sort: {}, rationale: null, dirty: false, requestChanged: false, requestPending: false, evaluationPending: false, evaluationError: null, submitError: null });
-  S.chat = { messages: [], understood: null, from: 0 };
+  S.chat = { messages: [], understood: null, from: 0, afterOrder: null };
   S.pendingCancel = null;
   S.pendingReminder = null;
   S.notice = null;
