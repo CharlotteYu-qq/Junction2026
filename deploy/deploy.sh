@@ -46,4 +46,8 @@ buyer_pw="$(printf '%s\n' "$conf" | sed -n 's/^BUYER_PASSWORD=//p' | tail -n1)"
 [ -n "$buyer_pw" ] || buyer_pw="$(printf '%s\n' "$conf" | sed -n 's/^DEMO_PASSWORD=//p' | tail -n1)"
 echo
 if [ -n "$site_domain" ]; then echo "Site:            https://$site_domain/"; else echo "Site:            http://$HOST/"; fi
-echo "Buyer password:  $buyer_pw"
+if [ -n "${CI:-}" ]; then
+  echo "Buyer password:  (not shown in CI logs; see the team chat)"   # GitHub Actions sets CI
+else
+  echo "Buyer password:  $buyer_pw"
+fi

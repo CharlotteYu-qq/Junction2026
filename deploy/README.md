@@ -30,9 +30,32 @@ bash deploy/deploy.sh <IP>          # uses ~/.ssh/id_ed25519_verda by default
 
 The script uploads the **last commit**, copies the Valio API key from your `.env` (first deploy only),
 installs Python and the dependencies, downloads the challenge data, and starts a systemd service on port 80.
-It also turns on the firewall (only SSH and HTTP open) and prints the URL plus the two sign-in passwords.
+It also turns on the firewall (only SSH and HTTP open) and prints the URL plus the buyer password.
 
 To update later, commit your changes and run the same command again. Data and orders on the server are kept.
+
+## Auto-deploy (GitHub Actions)
+
+Every push to `main` (including a merged pull request) runs [.github/workflows/deploy.yml](../.github/workflows/deploy.yml):
+
+1. **Test**: the unit tests and a JavaScript syntax check. If anything fails, nothing is deployed.
+2. **Deploy**: runs `deploy/deploy.sh` against the server with a deploy key. The server keeps its own `.env`,
+   data and orders; only the code is replaced.
+
+So to deploy, merge into `main` and watch the run in the repo's **Actions** tab (about 2 minutes).
+To redeploy without a new commit: Actions → **Deploy to Verda** → **Run workflow** (branch `main`).
+Pushes to other branches are not deployed. If two pushes come in quickly, the second deploy waits for the first.
+
+Setup (once, already done for our server):
+
+- A separate SSH key for GitHub (`github-actions-deploy@Junction2026`) is in the server's
+  `/root/.ssh/authorized_keys`. Its private key is the repository secret **`VERDA_SSH_KEY`**
+  (Settings → Secrets and variables → Actions). Without that secret the deploy step only prints a warning.
+- The server's SSH host key is pinned in the workflow (`HOST_KEY`). If the instance is ever recreated, update
+  `HOST` and `HOST_KEY` there (`ssh-keyscan -t ed25519 <IP>`) and add the deploy key to the new server.
+- To revoke GitHub's access, remove that line from the server's `authorized_keys` and delete the secret.
+
+Deploying by hand from a laptop (above) still works and does the same thing.
 
 ## HTTPS on a name (optional, free)
 
