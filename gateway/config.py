@@ -22,9 +22,10 @@ class Settings:
     claude_model: str = os.getenv("CLAUDE_MODEL", "") or "claude-opus-5-5"
     parser: str = os.getenv("PARSER", "auto")  # auto | rules | claude
     offer_ttl_minutes: int = int(os.getenv("OFFER_TTL_MINUTES", "") or 30)
-    # When DEMO_PASSWORD is set (public deployments), the whole site asks for a login.
-    demo_user: str = os.getenv("DEMO_USER", "") or "aimo"
-    demo_password: str = os.getenv("DEMO_PASSWORD", "")
+    # Sign-in passwords for the two portals. Buyers fall back to DEMO_PASSWORD (older deployments).
+    # With neither set (local development), signing in needs no password.
+    buyer_password: str = os.getenv("BUYER_PASSWORD", "") or os.getenv("DEMO_PASSWORD", "")
+    valio_password: str = os.getenv("VALIO_PASSWORD", "")
     valio_dir: Path = field(default=ROOT / "data" / "valio")
     runtime_dir: Path = field(default=ROOT / "data" / "runtime")
     ui_dir: Path = field(default=ROOT / "ui")

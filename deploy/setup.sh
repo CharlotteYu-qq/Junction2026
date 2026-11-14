@@ -40,10 +40,14 @@ echo "==> Python environment"
 .venv/bin/pip install -q -r requirements.txt
 
 echo "==> Configuration"
-if ! grep -q '^DEMO_PASSWORD=.\+' .env; then
-  password="$(python3 -c 'import secrets; print(secrets.token_urlsafe(9))')"
-  printf '\nDEMO_USER=aimo\nDEMO_PASSWORD=%s\n' "$password" >> .env
-  echo "    generated a site password"
+# Sign-in passwords for the two portals (buyers may still use DEMO_PASSWORD from older deployments)
+if ! grep -q -E '^(BUYER_PASSWORD|DEMO_PASSWORD)=.+' .env; then
+  printf '\nBUYER_PASSWORD=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(9))')" >> .env
+  echo "    generated a buyer portal password"
+fi
+if ! grep -q '^VALIO_PASSWORD=.\+' .env; then
+  printf '\nVALIO_PASSWORD=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(9))')" >> .env
+  echo "    generated a Valio admin password"
 fi
 chmod 600 .env
 

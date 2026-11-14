@@ -4,8 +4,6 @@ Run from the repo root:   python -m uvicorn gateway.app:app --reload --port 8000
 """
 from __future__ import annotations
 
-import base64
-import secrets
 import statistics
 import time
 from collections import defaultdict
@@ -14,8 +12,8 @@ from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -29,11 +27,13 @@ from gateway.planner import _availability, _parse_dt, _price_info, build_offer, 
 from gateway.store import Store
 from gateway.valio_client import ValioAPIError, ValioClient
 from trust.audit import AuditLog
+from trust.auth import COOKIE, SESSION_SECONDS, Principal, SessionSigner, password_ok
 from trust.customers import CustomerRegistry, trust_profile
 from trust.policy import eur, evaluate, has_claim
 from trust.signing import Signer
 
-S = SimpleNamespace(catalog=None, catalog_error=None, valio=None, signer=None, customers=None, audit=None, store=None, ping=(0.0, False))
+S = SimpleNamespace(catalog=None, catalog_error=None, valio=None, signer=None, customers=None, audit=None, store=None,
+                    sessions=None, ping=(0.0, False))
 
 OUTCOME_LABEL = {"auto_approve": "approved automatically", "needs_approval": "needs a person", "reject": "rejected"}
 
@@ -52,6 +52,7 @@ async def lifespan(_app: FastAPI):
     S.customers = CustomerRegistry(settings.runtime_dir / "customers.json")
     S.audit = AuditLog(settings.runtime_dir / "audit.jsonl")
     S.store = Store(settings.runtime_dir)
+    S.sessions = SessionSigner(settings.runtime_dir / "session_secret")
     yield
     await S.valio.close()
 
@@ -68,30 +69,96 @@ app = FastAPI(
 )
 
 
-# ----------------------------------------------------------------------------- site password (public deployments)
+# ----------------------------------------------------------------------------- sign-in: buyer portal and Valio admin
 
-OPEN_PATHS = ("/api/health", "/.well-known/")
+OPEN_API = ("/api/health", "/api/session")
 
 
-def _authorised(header: str) -> bool:
-    if not header.lower().startswith("basic "):
-        return False
-    try:
-        user, _, password = base64.b64decode(header[6:]).decode().partition(":")
-    except (ValueError, UnicodeDecodeError):
-        return False
-    return secrets.compare_digest(user.encode(), settings.demo_user.encode()) and secrets.compare_digest(
-        password.encode(), settings.demo_password.encode()
-    )
+def _principal(request: Request) -> Principal | None:
+    return S.sessions.read(request.cookies.get(COOKIE)) if S.sessions else None
 
 
 @app.middleware("http")
-async def demo_password(request: Request, call_next):
-    """HTTP Basic auth for the whole site when DEMO_PASSWORD is set; off for local development."""
-    if settings.demo_password and not request.url.path.startswith(OPEN_PATHS):
-        if not _authorised(request.headers.get("authorization", "")):
-            return Response("Login required", status_code=401, headers={"WWW-Authenticate": 'Basic realm="Aimo Agent Gateway"'})
+async def require_sign_in(request: Request, call_next):
+    """Every API call except health and sign-in needs a session. The web UI and agent discovery stay public."""
+    path = request.url.path
+    if path.startswith("/api/") and not path.startswith(OPEN_API) and _principal(request) is None:
+        return JSONResponse({"detail": "Sign in first"}, status_code=401)
     return await call_next(request)
+
+
+def signed_in(request: Request) -> Principal:
+    who = _principal(request)
+    if who is None:
+        raise HTTPException(401, "Sign in first")
+    return who
+
+
+def buyer(request: Request) -> Principal:
+    who = signed_in(request)
+    if who.role != "buyer":
+        raise HTTPException(403, "Only the buyer portal can do this")
+    return who
+
+
+def valio_staff(request: Request) -> Principal:
+    who = signed_in(request)
+    if who.role != "valio":
+        raise HTTPException(403, "Only Valio Aimo staff can do this")
+    return who
+
+
+def _passwords_required() -> bool:
+    return bool(settings.buyer_password or settings.valio_password)
+
+
+class LoginIn(BaseModel):
+    role: Literal["buyer", "valio"]
+    customer_id: str = Field(default="", max_length=20)  # buyer portal: which customer
+    name: str = Field(default="", max_length=60)  # Valio admin: the staff member's name, recorded with decisions
+    password: str = Field(default="", max_length=200)
+
+
+@app.get("/api/session", tags=["session"])
+def get_session(request: Request):
+    """Who is signed in, and what the sign-in page needs (the demo customers, whether passwords are required)."""
+    who = _principal(request)
+    return {
+        "signed_in": who is not None,
+        "role": who.role if who else None,
+        "name": who.name if who else None,
+        "customer_id": who.customer_id if who else None,
+        "password_required": _passwords_required(),
+        "customers": [{"id": c.id, "name": c.name} for c in S.customers.all()],
+    }
+
+
+@app.post("/api/session/login", tags=["session"])
+def login(body: LoginIn, request: Request, response: Response):
+    """Sign in to the buyer portal (as one customer) or to the Valio Aimo admin (as a named staff member)."""
+    if body.role == "buyer":
+        c = S.customers.get(body.customer_id.strip())
+        if not c:
+            raise HTTPException(400, "Choose your company")
+        who, expected = Principal(role="buyer", name=c.name, customer_id=c.id), settings.buyer_password
+    else:
+        name = " ".join(body.name.replace(":", " ").split())
+        if not name:
+            raise HTTPException(400, "Enter your name: it is recorded with your decisions")
+        who, expected = Principal(role="valio", name=name), settings.valio_password
+    if _passwords_required() and (not expected or not password_ok(body.password, expected)):
+        raise HTTPException(401, "Wrong password" if expected else "This sign-in is not set up on the server")
+    response.set_cookie(COOKIE, S.sessions.issue(who), max_age=SESSION_SECONDS, httponly=True, samesite="lax",
+                        secure=request.url.scheme == "https", path="/")
+    portal = "the buyer portal" if who.role == "buyer" else "the Valio Aimo admin"
+    S.audit.append(who.actor, "session.signed_in", who.customer_id or "valio-admin", f"{who.name} signed in to {portal}")
+    return {"signed_in": True, "role": who.role, "name": who.name, "customer_id": who.customer_id}
+
+
+@app.post("/api/session/logout", tags=["session"])
+def logout(response: Response):
+    response.delete_cookie(COOKIE, path="/")
+    return {"signed_in": False}
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -113,9 +180,10 @@ def _customer(customer_id: str) -> Customer:
     return c
 
 
-def _offer(offer_id: str) -> Offer:
+def _offer(offer_id: str, who: Principal | None = None) -> Offer:
+    """The offer; a buyer only ever sees its own (others look like they don't exist)."""
     o = S.store.offers.get(offer_id)
-    if not o:
+    if not o or (who is not None and who.role == "buyer" and o.customer_id != who.customer_id):
         raise HTTPException(404, f"Unknown offer {offer_id}")
     return o
 
@@ -159,6 +227,7 @@ def well_known():
         "openapi": "/openapi.json",
         "docs": "/docs",
         "flow": [
+            "POST /api/session/login {role: buyer, customer_id, password} - session cookie for the buyer portal",
             "POST /api/requests  - natural-language need -> signed fixed-price offer + policy preview",
             "POST /api/offers/{id}/evaluate - preview the decision for other selections",
             "POST /api/orders - commit an offer: placed | pending_approval | rejected",
@@ -196,21 +265,20 @@ class CustomerIn(BaseModel):
     business_id: str = Field(default="", max_length=20)
 
 
-class ReviewerIn(BaseModel):
-    reviewer: str = Field(min_length=1, max_length=60)
-
-
 @app.get("/api/customers", tags=["customers"])
-def list_customers():
+def list_customers(who: Principal = Depends(signed_in)):
+    """Valio Aimo staff see every customer; a buyer sees only its own record."""
+    if who.role == "buyer":
+        return [_customer_out(_customer(who.customer_id))]
     return [_customer_out(c) for c in S.customers.all()]
 
 
 @app.post("/api/customers", tags=["customers"])
-def register_customer(body: CustomerIn):
+def register_customer(body: CustomerIn, who: Principal = Depends(valio_staff)):
     c = S.customers.register(body.name, body.segment, body.business_id)
     S.audit.append(
-        "system", "customer.registered", c.id,
-        f"New customer {c.name} registered (business ID {c.business_id or 'missing'}, checksum "
+        who.actor, "customer.registered", c.id,
+        f"{who.name} registered new customer {c.name} (business ID {c.business_id or 'missing'}, checksum "
         f"{'OK' if c.business_id_valid else 'failed'}): not on the whitelist yet",
         {"business_id": c.business_id, "business_id_valid": c.business_id_valid},
     )
@@ -218,7 +286,7 @@ def register_customer(body: CustomerIn):
 
 
 @app.post("/api/customers/{customer_id}/verify", tags=["customers"])
-def verify_customer(customer_id: str, body: ReviewerIn):
+def verify_customer(customer_id: str, who: Principal = Depends(valio_staff)):
     c = _customer(customer_id)
     if c.status == "trusted":
         return _customer_out(c)
@@ -226,8 +294,8 @@ def verify_customer(customer_id: str, body: ReviewerIn):
         raise HTTPException(400, "The business ID fails the Y-tunnus checksum: fix it before verifying")
     c = S.customers.verify(customer_id)
     S.audit.append(
-        f"human:{body.reviewer.strip()}", "customer.whitelisted", c.id,
-        f"{body.reviewer.strip()} verified {c.name} and added it to the whitelist (auto-approval limit €{c.auto_approve_limit:,.0f})",
+        who.actor, "customer.whitelisted", c.id,
+        f"{who.name} verified {c.name} and added it to the whitelist (auto-approval limit €{c.auto_approve_limit:,.0f})",
     )
     return _customer_out(c)
 
@@ -236,7 +304,7 @@ def verify_customer(customer_id: str, body: ReviewerIn):
 
 
 class RequestIn(BaseModel):
-    customer_id: str
+    customer_id: Optional[str] = None  # optional: the buyer's session decides who is ordering
     text: str = Field(min_length=1, max_length=2000)
     override: Optional[ParsedRequest] = None  # the person's corrections to what the agent understood
 
@@ -246,10 +314,12 @@ class SelectionIn(BaseModel):
 
 
 @app.post("/api/requests", tags=["ordering"])
-async def create_request(body: RequestIn):
+async def create_request(body: RequestIn, who: Principal = Depends(buyer)):
     """Natural-language need -> parsed intent -> catalog search -> Valio price & availability -> signed offer."""
+    if body.customer_id and body.customer_id != who.customer_id:
+        raise HTTPException(403, "You can only order for your own company")
     _need_catalog()
-    customer = _customer(body.customer_id)
+    customer = _customer(who.customer_id)
     text = body.text.strip()
     if body.override:
         parsed, parse_ms = body.override, 0
@@ -287,14 +357,14 @@ async def create_request(body: RequestIn):
 
 
 @app.get("/api/offers/{offer_id}", tags=["ordering"])
-def get_offer(offer_id: str):
-    return _offer(offer_id).model_dump(mode="json")
+def get_offer(offer_id: str, who: Principal = Depends(signed_in)):
+    return _offer(offer_id, who).model_dump(mode="json")
 
 
 @app.post("/api/offers/{offer_id}/evaluate", tags=["ordering"])
-def evaluate_offer(offer_id: str, body: SelectionIn):
+def evaluate_offer(offer_id: str, body: SelectionIn, who: Principal = Depends(signed_in)):
     """Preview the policy decision for a selection, without placing anything."""
-    offer = _offer(offer_id)
+    offer = _offer(offer_id, who)
     decision, _ = evaluate(_customer(offer.customer_id), offer, body.selections, datetime.now(TZ), verify_offer(offer, S.signer))
     return decision.model_dump(mode="json")
 
@@ -309,8 +379,7 @@ class OrderIn(BaseModel):
 
 
 class DecisionIn(BaseModel):
-    decision: Literal["approve", "reject"]
-    reviewer: str = Field(min_length=1, max_length=60)
+    decision: Literal["approve", "reject"]  # the reviewer is the signed-in Valio Aimo staff member
     comment: str = Field(default="", max_length=500)
     verify_customer: bool = False
 
@@ -326,9 +395,9 @@ def _order_out(o: Order) -> dict:
 
 
 @app.post("/api/orders", tags=["ordering"])
-def place_order(body: OrderIn):
+def place_order(body: OrderIn, who: Principal = Depends(buyer)):
     """Commit an offer. The policy decides: placed (within authority), pending_approval, or rejected."""
-    offer = _offer(body.offer_id)
+    offer = _offer(body.offer_id, who)
     customer = _customer(offer.customer_id)
     used = next((o for o in S.store.orders.values() if o.offer_id == offer.id), None)
     if used:
@@ -357,30 +426,34 @@ def place_order(body: OrderIn):
                        f"{order.id} placed automatically for {customer.name}: {lines_text} = {eur(order.total)} (simulated: the mock backend has no order endpoint)", data)
     elif status == "pending_approval":
         S.audit.append("agent", "order.sent_for_approval", order.id,
-                       f"{order.id} for {customer.name} sent to a person for approval ({eur(order.total)})", data)
+                       f"{order.id} for {customer.name} sent to Valio Aimo for approval ({eur(order.total)})", data)
     else:
         S.audit.append("agent", "order.rejected", order.id, f"{order.id} not placed: {decision.summary}", data)
     return _order_out(order)
 
 
 @app.get("/api/orders", tags=["ordering"])
-def list_orders(status: Optional[str] = None):
-    return [_order_out(o) for o in S.store.list_orders(status)]
+def list_orders(status: Optional[str] = None, who: Principal = Depends(signed_in)):
+    """Valio Aimo staff see every order; a buyer sees only its own."""
+    orders = S.store.list_orders(status)
+    if who.role == "buyer":
+        orders = [o for o in orders if o.customer_id == who.customer_id]
+    return [_order_out(o) for o in orders]
 
 
 @app.post("/api/orders/{order_id}/decision", tags=["approvals"])
-def decide_order(order_id: str, body: DecisionIn):
-    """A person approves or rejects an order the agent could not place on its own."""
+def decide_order(order_id: str, body: DecisionIn, who: Principal = Depends(valio_staff)):
+    """Valio Aimo staff approve or reject an order the agent could not place on its own."""
     order = S.store.orders.get(order_id)
     if not order:
         raise HTTPException(404, f"Unknown order {order_id}")
     if order.status != "pending_approval":
         raise HTTPException(409, f"{order_id} is already {order.status}")
     customer = _customer(order.customer_id)
-    reviewer = body.reviewer.strip()
+    reviewer = who.name.strip()
     comment = body.comment.strip()
     if not reviewer:
-        raise HTTPException(400, "Enter the reviewer's name")
+        raise HTTPException(400, "The reviewer needs a name: sign in again")
     now = datetime.now(TZ)
     if body.decision == "approve":
         # Approval grants authority; it cannot waive hard rules or revive an expired offer.
@@ -420,7 +493,7 @@ def decide_order(order_id: str, body: DecisionIn):
 
 
 @app.get("/api/audit", tags=["audit"])
-def get_audit(subject: Optional[str] = None):
+def get_audit(subject: Optional[str] = None, who: Principal = Depends(valio_staff)):
     events = S.audit.events(subject)
     return {"chain": S.audit.verify(), "events": [e.model_dump(mode="json") for e in reversed(events)]}
 
@@ -507,11 +580,12 @@ class QuoteIn(BaseModel):
 
 
 @app.post("/api/catalog/quote", tags=["catalog"])
-async def catalog_quote(body: QuoteIn):
+async def catalog_quote(body: QuoteIn, who: Principal = Depends(signed_in)):
     """Live price & availability for a few hand-picked products (keeps Valio's API usage narrow)."""
+    customer_id = who.customer_id if who.role == "buyer" else body.customer_id  # buyers get their own prices
     try:
-        prices, _ = await S.valio.price(body.product_ids, body.requested_date, body.customer_id)
-        avail, meta = await S.valio.availability(body.product_ids, body.requested_date, body.customer_id)
+        prices, _ = await S.valio.price(body.product_ids, body.requested_date, customer_id)
+        avail, meta = await S.valio.availability(body.product_ids, body.requested_date, customer_id)
     except ValioAPIError as e:
         raise HTTPException(502, str(e))
     time_now = _parse_dt(meta.get("time_now")) or datetime.now(TZ)
@@ -528,12 +602,13 @@ async def catalog_quote(body: QuoteIn):
 
 
 @app.post("/api/admin/reset", tags=["meta"])
-def reset_demo():
-    """Restore the demo customers and clear offers, orders and the audit trail."""
+def reset_demo(who: Principal = Depends(valio_staff)):
+    """Restore the demo customers and clear offers, orders and the audit trail (Valio Aimo staff only)."""
     S.customers.reset()
     S.store.reset()
     S.audit.reset()
-    S.audit.append("system", "demo.reset", "system", "Demo data reset: demo customers restored, orders and audit trail cleared")
+    S.audit.append(who.actor, "demo.reset", "system",
+                   f"{who.name} reset the demo data: demo customers restored, orders and audit trail cleared")
     return {"ok": True}
 
 
