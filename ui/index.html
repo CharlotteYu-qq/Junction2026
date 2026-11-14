@@ -15,15 +15,10 @@
         <span class="brand-word">Aimo</span><span class="brand-tag">Agent Gateway</span>
       </a>
       <nav class="main-nav" aria-label="Main" hidden>
-        <a href="#analytics" data-page="analytics" data-roles="valio">Dashboard</a>
         <a href="#order" data-page="order" data-roles="buyer">Order</a>
         <a href="#orders" data-page="orders" data-roles="buyer">My orders</a>
-        <a href="#review" data-page="review" data-roles="valio">Review queue <span class="nav-count" id="nav-review-count" hidden></span></a>
-        <a href="#customers" data-page="customers" data-roles="valio">Customers</a>
-        <a href="#audit" data-page="audit" data-roles="valio">Audit trail</a>
-        <a href="#explore" data-page="explore" data-roles="buyer valio">Explore</a>
+        <a href="#explore" data-page="explore" data-roles="buyer">Explore</a>
       </nav>
-      <button type="button" class="btn btn-small admin-open" id="admin-open">Valio Aimo admin</button>
       <div id="session-box" class="session-box" hidden>
         <span id="session-who" class="session-who"></span>
         <button type="button" class="btn btn-small" id="sign-out">Sign out</button>
@@ -32,45 +27,6 @@
   </header>
 
   <main>
-    <!-- ======================================================= ADMIN DASHBOARD -->
-    <section id="page-analytics" class="page" hidden>
-      <div class="hero hero-compact">
-        <div class="container">
-          <p class="eyebrow">Valio Aimo · Analytics</p>
-          <h1>Assortment overview</h1>
-          <p class="lead">A purchasing-first view of the signals that need an operator’s attention: price and availability.</p>
-        </div>
-      </div>
-      <div id="analytics-dashboard" class="container analytics-content">
-        <div id="analytics-kpis" class="analytics-kpis" aria-live="polite"></div>
-        <section class="panel analytics-panel market-panel">
-          <div class="panel-head">
-            <div><p class="eyebrow">Operational watchlist</p><h2>Price &amp; stock availability</h2></div>
-            <span class="muted small">Live check of a representative assortment sample</span>
-          </div>
-          <div class="analytics-chart-grid">
-            <div id="analytics-price"></div>
-            <div id="analytics-availability"></div>
-          </div>
-          <p id="analytics-market-note" class="chart-caption"></p>
-        </section>
-        <div class="analytics-chart-grid">
-          <section class="panel analytics-panel">
-            <div class="panel-head"><div><p class="eyebrow">Environmental impact</p><h2>Carbon footprint by product group</h2></div></div>
-            <div id="analytics-carbon"></div>
-          </section>
-          <section class="panel analytics-panel">
-            <div class="panel-head"><div><p class="eyebrow">Fulfilment</p><h2>Delivery reliability by product group</h2></div></div>
-            <div id="analytics-reliability"></div>
-          </section>
-        </div>
-        <section class="panel analytics-panel">
-          <div class="panel-head"><div><p class="eyebrow">Data coverage</p><h2>Product group details</h2></div></div>
-          <div id="analytics-categories" class="table-wrap"></div>
-        </section>
-        <p id="analytics-error" class="signin-note" role="alert" hidden></p>
-      </div>
-    </section>
 
     <!-- ======================================================= SIGN IN -->
     <section id="page-signin" class="page" hidden>
@@ -110,11 +66,11 @@
                 </div>
                 <div class="home-benefit">
                   <span class="home-benefit-number" aria-hidden="true">02</span>
-                  <span><strong>Compare suitable options</strong><span class="home-benefit-detail">Check product details, prices and availability.</span></span>
+                  <span><strong>Compare suitable options</strong><span class="home-benefit-detail">The agent ranks products by fit, price and availability; you choose.</span></span>
                 </div>
                 <div class="home-benefit">
                   <span class="home-benefit-number" aria-hidden="true">03</span>
-                  <span><strong>Stay in control</strong><span class="home-benefit-detail">Orders outside your limit go to a person for approval.</span></span>
+                  <span><strong>Stay in control</strong><span class="home-benefit-detail">Orders outside the agent's limit need a named person to approve them.</span></span>
                 </div>
               </div>
             </div>
@@ -142,19 +98,13 @@
         <div class="container">
           <p class="eyebrow">Order assistant</p>
           <h1>What does your kitchen need?</h1>
-          <p class="lead">Describe it in your own words. The agent turns it into concrete order lines, checks live prices and
-            availability with Valio Aimo, and then either places the order within your limit or sends it to Valio Aimo for approval.</p>
+          <p class="lead">Describe it in your own words. The agent asks for anything missing, checks live prices and availability with
+            Valio Aimo and recommends the best option. You choose and place the order; outside the agent's limit, a named
+            person approves it.</p>
         </div>
       </div>
       <div class="container">
         <form id="request-form" class="panel request-panel" novalidate>
-          <div class="form-row">
-            <div class="field field-customer">
-              <span class="label">Ordering as</span>
-              <div id="customer-name" class="customer-fixed"></div>
-            </div>
-            <div id="trust-card" class="trust-card" aria-live="polite"></div>
-          </div>
           <div id="chat-thread" class="chat-thread" aria-live="polite" aria-label="Conversation with the agent" hidden></div>
           <div class="field">
             <label for="request-text" id="request-label">Your request</label>
@@ -163,6 +113,17 @@
           <div class="examples" id="examples" aria-label="Example requests"></div>
           <div class="form-actions">
             <button class="btn btn-primary" type="submit" id="run-btn">Find the best option</button>
+            <div class="voice-controls" id="voice-controls" hidden>
+              <button class="btn btn-small btn-voice" type="button" id="voice-btn" aria-pressed="false">
+                <svg class="voice-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
+                <span id="voice-label">Speak</span>
+              </button>
+              <select id="voice-lang" aria-label="Language for voice input">
+                <option value="en-GB">English</option>
+                <option value="fi-FI">Suomi</option>
+                <option value="sv-SE">Svenska</option>
+              </select>
+            </div>
             <span id="run-status" class="run-status" aria-live="polite"></span>
           </div>
         </form>
@@ -176,89 +137,12 @@
         <div class="container">
           <p class="eyebrow">Buyer portal</p>
           <h1>My orders</h1>
-          <p class="lead">Everything you ordered and what happened to it: placed automatically, waiting for Valio Aimo, or
-            decided by a person at Valio Aimo.</p>
+          <p class="lead">Your orders: placed within the agent's authority, approved by a named person in your
+            organisation, or cancelled. A placed order can be cancelled until the order cut-off of its delivery.</p>
         </div>
       </div>
       <div class="container">
         <div id="my-orders"></div>
-      </div>
-    </section>
-
-    <!-- ======================================================= REVIEW -->
-    <section id="page-review" class="page" hidden>
-      <div class="hero hero-compact">
-        <div class="container">
-          <p class="eyebrow">Human in the loop</p>
-          <h1>Review queue</h1>
-          <p class="lead">Orders the agent was not allowed to place on its own. Each card says exactly why.</p>
-        </div>
-      </div>
-      <div class="container">
-        <div class="toolbar">
-          <span id="reviewer-note" class="muted"></span>
-        </div>
-        <div id="review-list" class="stack"></div>
-        <h2 class="section-title">Recently decided</h2>
-        <div id="review-done"></div>
-      </div>
-    </section>
-
-    <!-- ======================================================= CUSTOMERS -->
-    <section id="page-customers" class="page" hidden>
-      <div class="hero hero-compact">
-        <div class="container">
-          <p class="eyebrow">Trust</p>
-          <h1>Customers &amp; whitelist</h1>
-          <p class="lead">Returning customers are on the whitelist and may get orders approved automatically up to a limit.
-            New customers are reviewed by a person until someone verifies the business.</p>
-        </div>
-      </div>
-      <div class="container">
-        <div id="customer-table"></div>
-        <div class="two-col">
-          <form id="register-form" class="panel" novalidate>
-            <h3>Register a new customer</h3>
-            <div class="field"><label for="reg-name">Business name</label><input id="reg-name" type="text" required maxlength="120"></div>
-            <div class="field"><label for="reg-segment">Type</label>
-              <select id="reg-segment">
-                <option>restaurant</option><option>hotel</option><option>school kitchen</option>
-                <option>hospital kitchen</option><option>catering</option><option>café</option>
-              </select>
-            </div>
-            <div class="field"><label for="reg-bid">Business ID (Y-tunnus)</label>
-              <input id="reg-bid" type="text" placeholder="1234567-8" maxlength="9" inputmode="numeric">
-              <span id="reg-bid-hint" class="hint" aria-live="polite"></span>
-            </div>
-            <button class="btn btn-primary btn-small" type="submit">Register</button>
-            <span id="reg-status" class="run-status" aria-live="polite"></span>
-          </form>
-          <div class="panel panel-note">
-            <h3>How trust is decided</h3>
-            <ul class="plain-list">
-              <li><strong>Whitelist:</strong> a customer who has bought before and was verified. Orders within its auto-approval limit are placed without a person.</li>
-              <li><strong>New customer:</strong> every order goes to the review queue. Approving it can also verify the customer.</li>
-              <li><strong>Business ID:</strong> checked with the Y-tunnus checksum today. Next step: look it up in the Finnish Trade Register (PRH open data). That's more reliable than scraping personal data from the web, and GDPR-friendly.</li>
-              <li><strong>Hard rules</strong> (allergens) are never overridden, even for trusted customers.</li>
-            </ul>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ======================================================= AUDIT -->
-    <section id="page-audit" class="page" hidden>
-      <div class="hero hero-compact">
-        <div class="container">
-          <p class="eyebrow">Traceability</p>
-          <h1>Audit trail</h1>
-          <p class="lead">Every step the agent, the policy and people took, in plain language. Each entry is chained to the
-            previous one by its hash, so the record can't be edited silently.</p>
-        </div>
-      </div>
-      <div class="container">
-        <div class="toolbar" id="audit-toolbar"></div>
-        <ol id="audit-list" class="timeline"></ol>
       </div>
     </section>
 
@@ -282,27 +166,27 @@
     </section>
   </main>
 
-  <dialog id="admin-dialog" class="admin-dialog" aria-labelledby="admin-dialog-title">
+  <dialog id="approve-dialog" class="admin-dialog approve-dialog" aria-labelledby="approve-title">
     <div class="admin-dialog-banner">
       <div class="admin-dialog-head">
-        <span class="admin-dialog-mark" aria-hidden="true">A</span>
-        <button type="button" class="dialog-close" id="admin-close" aria-label="Close admin sign in">×</button>
+        <span class="admin-dialog-mark" aria-hidden="true">✓</span>
+        <button type="button" class="dialog-close" id="approve-close" aria-label="Don't order">×</button>
       </div>
-      <p class="admin-dialog-kicker">Valio Aimo · Admin</p>
-      <h2 id="admin-dialog-title">Review and manage</h2>
+      <p class="admin-dialog-kicker">Needs your approval</p>
+      <h2 id="approve-title">This order is outside the agent's limit</h2>
     </div>
     <div class="admin-dialog-body">
-      <p class="admin-dialog-description">Approve or reject orders the agent could not place, and manage the customer whitelist.</p>
-      <form id="signin-valio" class="admin-signin-form" novalidate>
-        <div class="field"><label for="signin-name">Your name</label>
-          <input id="signin-name" type="text" maxlength="60" autocomplete="name" placeholder="Enter your name">
-          <span class="hint muted">Recorded with every decision you make.</span></div>
-        <div class="field signin-password"><label for="signin-valio-password">Password</label>
-          <input id="signin-valio-password" type="password" autocomplete="current-password" placeholder="Enter your password"></div>
-        <button class="btn btn-primary" type="submit">Sign in to admin <span aria-hidden="true">→</span></button>
+      <div id="approve-summary" class="approve-summary"></div>
+      <form id="approve-form" class="admin-signin-form" novalidate>
+        <div class="field"><label for="approve-name">Type your full name to approve</label>
+          <input id="approve-name" type="text" maxlength="80" autocomplete="name" placeholder="First and last name">
+          <span class="hint muted">The order is placed in your name and recorded in the audit trail.</span></div>
+        <div class="approve-actions">
+          <button class="btn btn-primary" type="submit" id="approve-submit">Approve and place the order</button>
+          <button class="btn" type="button" id="approve-cancel">Don't order</button>
+        </div>
         <p class="signin-error bad small" role="alert" hidden></p>
       </form>
-      <p class="admin-dialog-note"><span aria-hidden="true">✓</span> Decisions are recorded in the audit trail.</p>
     </div>
   </dialog>
 

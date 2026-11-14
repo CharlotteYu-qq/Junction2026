@@ -16,7 +16,7 @@ Kept as a library that `gateway/` calls, so it can be unit-tested without the ba
 
 | File | What it does |
 |---|---|
-| `auth.py` | Sign-in for the two portals: signed session cookies, buyer vs. Valio Aimo roles |
+| `auth.py` | Buyer sign-in: signed session cookies, one account per customer |
 | `customers.py` | Whitelist & trust tiers, Y-tunnus checksum, demo customers |
 | `policy.py` | `evaluate()` → auto_approve / needs_approval / reject, with every check explained; `constraint_check()` for allergens and preferences |
 | `signing.py` | Ed25519 key, offer hashing and verification |

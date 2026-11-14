@@ -15,19 +15,15 @@ python -m uvicorn gateway.app:app --reload --port 8000
 
 Open <http://127.0.0.1:8000>. The API docs are at <http://127.0.0.1:8000/docs>. The first start builds a slim catalog index, which takes a few seconds.
 
-The site opens on a buyer-focused landing page. Buyers sign in there; Valio Aimo staff can open the separate admin sign-in from the header. Locally, with no `BUYER_PASSWORD` / `VALIO_PASSWORD` in `.env`, signing in needs no password.
+The site opens on a buyer-focused landing page where buyers sign in. Locally, with no `BUYER_PASSWORD` in `.env`, signing in needs no password.
 
-| Portal | Page | What it shows |
-|---|---|---|
-| Buyer | **Order** | Type a need in plain words (English or basic Finnish). The agent shows what it understood (you can edit it), the steps it ran, ranked options per item with live prices and stock, and the decision: placed automatically, sent to Valio Aimo for approval, or blocked |
-| Buyer | **My orders** | Your orders and what happened to each: placed automatically, waiting for Valio Aimo, or decided by a named person |
-| Valio Aimo | **Dashboard** | Portfolio analytics for carbon footprint, delivery reliability, product-group data coverage and country of origin |
-| Valio Aimo | **Review queue** | Orders that need a person, each with the reasons, the order lines, the request and the agent's rationale. Approving can also verify a new customer |
-| Valio Aimo | **Customers** | The whitelist: trust status, Y-tunnus checksum, auto-approval limit and hard allergen rules. You can register a new customer |
-| Valio Aimo | **Audit trail** | Every step by the customer, agent, policy and people, in plain language and hash-chained |
-| Both | **Explore** | Search and filter aggregate product-group insights; product and supplier records, prices, customers and orders are not exposed |
+| Page | What it shows |
+|---|---|
+| **Order** | Talk to the ordering agent in plain words (English, Finnish or Swedish; typed or spoken). It asks for anything missing, checks live prices and stock, and shows ranked options with its recommendation. You choose an option and click **Place order**; outside the agent's authority, a dialog asks a person to approve by typing their full name |
+| **My orders** | Your orders: placed within the agent's authority, approved by a named person, or cancelled. A placed order can be cancelled until the order cut-off of its delivery |
+| **Explore** | Search and filter aggregate product-group insights; product and supplier records, prices, customers and orders are not exposed |
 
-Sign in as a buyer and use the example buttons on the Order page for the demo scenarios.
+Sign in as a buyer and use the example buttons on the Order page for the demo scenarios. Every step is still written to the hash-chained audit log in `data/runtime/audit.jsonl`.
 
 **Deploying** to a Verda CPU instance takes one script: see [deploy/README.md](deploy/README.md).
 
@@ -41,7 +37,7 @@ For that to work, the agent needs an interface through which it can:
 
 1. **Look up** products, prices and availability in a structured way.
 2. **Move from inquiry to a firm order** at fixed prices, with no negotiation.
-3. **Stay inside its authority.** The agent decides some things on its own, and the rest goes to a person at Valio Aimo for sign-off.
+3. **Stay inside its authority.** The agent decides some things on its own, and the rest goes to a person in the customer's organisation for sign-off.
 
 All of this must work without exposing internal systems, confidential data or the marketplace roadmap. It should also be built on open, verifiable standards, so that the interface is not defined by someone else's platform.
 
@@ -53,17 +49,17 @@ We build an **ordering agent** into a **gateway** that Valio Aimo runs in front 
 |---|------|---------------|
 | 1 | **One interface, two transports.** The tools the agent uses are offered as **REST/OpenAPI** today and as an **MCP server** next, so other clients get the same rules. | Open standards, no lock-in to one platform |
 | 2 | **Signed offers that expire** *(trust protocol)*. Every price and availability answer is an offer with an `offer_id`, a validity window, its data source and timestamp, and a gateway signature (Ed25519). An order points to an offer. | An agent can check claims without a manual step, and prices are fixed |
-| 3 | **Customer limits and a policy engine** *(guardrails)*. Valio Aimo decides which customers are trusted and up to which total their orders may be placed automatically; customers' hard rules (such as allergens) always apply. Each order is checked and gets one of three results: `auto_approve`, `needs_approval` (with reasons) or `reject`. | Clear lines between what the agent decides alone and what a person at Valio Aimo signs off |
+| 3 | **The agent's authority and a policy engine** *(guardrails)*. Each customer's agent may order up to a set total on its own; hard rules (such as allergens) always apply. Each order is checked and gets one of three results: `auto_approve` (the agent orders), `needs_approval` (a named person in the customer's organisation must approve) or `reject`. | Clear lines between what the agent decides alone and what a person signs off |
 | 4 | **An audit trail people can read**. Every step (search, offer, decision, approval, order) is added to a log where each entry is chained to the previous one by its hash. Each entry includes the agent's stated reason. The log is shown as a timeline to the buyer and to Valio Aimo. | Traceability and explanations, and trust on both sides |
 
 ## Architecture
 
 ```
 ┌──────────────────────────────┐        ┌──────────────────────────────┐
-│ Buyer (a kitchen)            │        │ Valio Aimo staff             │
-│ Buyer portal: chat   (ui/)   │        │ Review & admin UI    (ui/)   │
+│ Buyer (a kitchen)            │        │ Approver (same organisation) │
+│ Buyer portal: chat   (ui/)   │        │ Approval dialog      (ui/)   │
 └──────────────┬───────────────┘        └──────────────┬───────────────┘
-               │ REST (buyer session)                  │ REST (staff session)
+               │ REST (buyer session)                  │ approved_by = full name
                ▼                                       ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Aimo Agent Gateway, run by Valio Aimo                                │
@@ -88,7 +84,7 @@ sequenceDiagram
     participant A as Ordering agent
     participant G as Gateway tools
     participant P as Policy engine
-    participant H as Valio Aimo staff
+    participant H as Approver (customer's organisation)
     participant B as Valio Aimo backend (mock)
     U->>A: "I need lactose-free milk"
     A-->>U: "How much, and for which day?"
@@ -97,15 +93,15 @@ sequenceDiagram
     A->>G: price & availability for the shortlist
     G->>B: price & stock lookup
     G-->>U: signed offer (fixed prices, valid until T) + ranked options
-    U->>G: place order (offer_id, rationale)
+    U->>G: place order (chosen option, rationale)
     G->>P: evaluate(order, customer limits)
     alt within the customer's limit
         P-->>G: auto_approve
         G-->>U: placed
     else over the limit, new customer or substitute
         P-->>G: needs_approval(reasons)
-        G-->>U: waiting for Valio Aimo
-        H->>G: approve (named staff member)
+        G-->>U: approval dialog
+        H->>G: approve (types their full name)
         G-->>U: placed
     else hard rule violated (e.g. allergen)
         P-->>G: reject(reason)
@@ -121,15 +117,14 @@ The data models live in [contracts/models.py](contracts/models.py).
 | Endpoint | Purpose |
 |---|---|
 | `GET /.well-known/aimo-agent-gateway.json` | Discovery for agents: flow, offer-signing public key, data boundary |
-| `POST /api/session/login` | Sign in to the buyer portal (as one customer) or the Valio Aimo admin |
+| `POST /api/session/login` | Sign in to the buyer portal (as one customer) |
 | `POST /api/chat` | Talk to the ordering agent: a question while details are missing, then a **signed fixed-price offer** + policy preview |
 | `POST /api/requests` | Natural-language need → parsed intent → catalog search → Valio price & availability → **signed fixed-price offer** + policy preview |
 | `POST /api/offers/{id}/evaluate` | Preview the decision for a different selection (nothing is placed) |
-| `POST /api/orders` | Commit an offer → `placed` / `pending_approval` / `rejected`, with every check explained |
-| `POST /api/orders/{id}/decision` | Valio Aimo staff approve or reject, and can verify a new customer |
-| `GET /api/audit` | The hash-chained, readable audit trail and the chain verification |
+| `POST /api/orders` | Commit an offer → `placed` / `rejected`, with every check explained; outside the agent's authority it needs `approved_by` (the approver's full name) |
 | `GET /api/catalog/search`, `POST /api/catalog/quote` | Explore static data; live price and stock only for hand-picked products |
-| `GET/POST /api/customers` | Whitelist / trust registry |
+| `POST /api/orders/{id}/cancel` | Cancel a placed order (optional reason) until the order cut-off of its delivery |
+| `GET /api/customers` | The signed-in customer's own record |
 
 Next step: expose the same operations as **MCP tools**, so other clients and agents can call them directly.
 
@@ -138,17 +133,17 @@ Next step: expose the same operations as **MCP tools**, so other clients and age
 | Situation | Decision |
 |---|---|
 | Customer on the whitelist, total within its auto-approval limit, everything available on time and matching the request | ✅ Placed automatically |
-| New customer (not on the whitelist) | 🧑 Valio Aimo approves, and can verify the customer at the same time |
-| Total above the auto-approval limit, or more than 3× the customer's average order | 🧑 Valio Aimo approves |
+| New customer (not on the whitelist) | 🧑 A named person approves |
+| Total above the agent's limit, or more than 3× the customer's average order | 🧑 A named person approves |
 | Not enough stock, a later delivery date, or the order cut-off has passed | ⛔ Revise the quantity/date and request a new offer |
-| Substitute outside preferences | 🧑 Valio Aimo approves only when substitution is permitted; requested allergen exclusions remain hard rules |
+| Substitute outside preferences | 🧑 A named person approves only when substitution is permitted; requested allergen exclusions remain hard rules |
 | Missing explicit evidence for a requested or strict allergen exclusion | ⛔ Blocked until evidence is obtained and a new offer is evaluated |
 | Product contains or may contain an allergen the customer never accepts | ⛔ Excluded / rejected (hard rule) |
 | Offer expired or signature mismatch | ⛔ Rejected, including when approval is attempted |
 
 ## What stays private
 
-The gateway exposes only selected data. It never exposes purchase prices, margins, supplier terms, other customers' data or the internal roadmap. The backend API key stays on the server. The web app has two portals, checked on the server: buyers order and see only their own orders, and Valio Aimo staff review exceptions and manage customers. Per-user accounts and scoped, revocable agent credentials are the next steps.
+The gateway exposes only selected data. It never exposes purchase prices, margins, supplier terms, other customers' data or the internal roadmap. The backend API key stays on the server. Buyers sign in per company and see only their own orders; the server checks this on every call. Approval is a deliberate double-check (the approver types their full name, which is recorded), not yet an authenticated approver account. Per-user accounts and scoped, revocable agent credentials are the next steps.
 
 ## Repository layout
 

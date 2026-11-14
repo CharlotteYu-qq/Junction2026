@@ -1,7 +1,7 @@
 """The ordering agent asks for what is missing before it prepares an offer."""
 import unittest
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
@@ -10,9 +10,9 @@ from fastapi.testclient import TestClient
 
 from agent import dialogue
 from agent.rules_parser import parse, stated_amounts
-from contracts.models import ParsedRequest, RequestItem
+from contracts.models import Decision, Order, OrderLine, ParsedRequest, RequestItem
 from gateway import app as gateway_app
-from gateway.config import settings
+from gateway.config import TZ, settings
 from gateway.store import Store
 from trust.audit import AuditLog
 from trust.auth import SessionSigner
@@ -68,8 +68,51 @@ class MergeAnswerTests(unittest.TestCase):
     def test_stated_amounts_ignore_dates_and_money(self):
         self.assertEqual(stated_amounts("200 litres on 20.11., budget 500 EUR", TODAY), [(200, "L")])
 
+    def test_a_bare_amount_corrects_the_item_in_that_unit(self):
+        merged = dialogue.merge_answer(parse("200 litres of milk for Friday", TODAY), "Actually make it 300 litres", TODAY)
+        self.assertEqual([(i.product_query, i.quantity) for i in merged.items], [("milk", 300)])
 
-class ChatEndpointTests(unittest.TestCase):
+
+class RulesDateTests(unittest.TestCase):
+    def test_recently_passed_date_is_asked_for_not_moved_a_year(self):
+        request = parse("100 litres of milk for 10.11.", TODAY)
+        self.assertTrue(request.delivery_date_assumed)
+        self.assertIn("which day", dialogue.follow_up_question(request))
+
+    def test_day_of_month_with_ordinal(self):
+        self.assertEqual(parse("30 kg rice on the 25th", TODAY).delivery_date, date(2026, 11, 25))
+        self.assertEqual(parse("30 kg rice on the 3rd", TODAY).delivery_date, date(2026, 12, 3))
+        self.assertEqual(parse("25 kg rice for Friday", TODAY).items[0].quantity, 25)  # "25 kg" is not a date
+
+
+class ClaudeAmountGuardTests(unittest.TestCase):
+    def _parsed(self, *items):
+        return ParsedRequest(items=[RequestItem(text="", product_query=p, quantity=q, unit=u) for p, q, u in items],
+                             delivery_date=date(2026, 11, 20))
+
+    def test_amount_written_with_a_unit_overrides_a_misread(self):
+        from agent.claude_parser import check_amounts
+        parsed = self._parsed(("dill", 500, "KG"))
+        check_amounts(parsed, "500 g fresh dill for Friday", TODAY)
+        self.assertEqual(parsed.items[0].quantity, 0.5)
+
+    def test_ambiguous_misread_must_be_confirmed(self):
+        from agent.claude_parser import check_amounts
+        parsed = self._parsed(("dill", 500, "KG"), ("parsley", 0.3, "KG"))
+        check_amounts(parsed, "500 g dill and 300 g parsley", TODAY)
+        self.assertTrue(parsed.items[0].assumption)
+        self.assertFalse(parsed.items[1].assumption)
+
+    def test_matching_and_unitless_amounts_are_left_alone(self):
+        from agent.claude_parser import check_amounts
+        parsed = self._parsed(("milk", 200, "L"), ("egg", 200, "PCS"))
+        check_amounts(parsed, "200 litres of milk and 200 eggs", TODAY)
+        self.assertEqual([(i.quantity, i.assumption) for i in parsed.items], [(200, ""), (200, "")])
+
+
+class ChatCase(unittest.TestCase):
+    """Shared setup: a signed-in buyer (C-1001), rules parser, no catalog or Valio calls."""
+
     def setUp(self):
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -78,7 +121,7 @@ class ChatEndpointTests(unittest.TestCase):
             patch.multiple(gateway_app.S, store=Store(runtime), customers=CustomerRegistry(runtime / 'customers.json'),
                            audit=AuditLog(runtime / 'audit.jsonl'), signer=Signer(runtime / 'key.pem'),
                            sessions=SessionSigner(runtime / 'session_secret')),
-            patch.object(gateway_app, 'settings', replace(settings, buyer_password='', valio_password='', anthropic_api_key='')),
+            patch.object(gateway_app, 'settings', replace(settings, buyer_password='', anthropic_api_key='')),
             patch.object(gateway_app, '_today', lambda: TODAY),
             patch.object(gateway_app, '_need_catalog', lambda: None),
             patch.object(gateway_app, '_offer_response', AsyncMock(return_value={'offer': {'id': 'OF-test'}})),
@@ -88,6 +131,7 @@ class ChatEndpointTests(unittest.TestCase):
         self.client = TestClient(gateway_app.app)
         self.client.post('/api/session/login', json={'role': 'buyer', 'customer_id': 'C-1001'}).raise_for_status()
 
+class ChatEndpointTests(ChatCase):
     def test_agent_asks_then_prepares_the_offer(self):
         first = self.client.post('/api/chat', json={'messages': [{'role': 'buyer', 'text': 'I need milk'}]}).json()
         self.assertEqual(first['kind'], 'question')
@@ -100,6 +144,17 @@ class ChatEndpointTests(unittest.TestCase):
         self.assertEqual((parsed.items[0].quantity, parsed.items[0].unit, parsed.delivery_date), (200, 'L', date(2026, 11, 20)))
         actions = [e.action for e in gateway_app.S.audit.events()]
         self.assertIn('agent.asked', actions)
+        # the rule-based parser understood it (Claude unreachable): the buyer is reminded every time
+        self.assertIn('double-check', first['notice'])
+        self.assertIn('double-check', second['notice'])
+
+    def test_no_reminder_when_claude_understood_the_request(self):
+        parsed = ParsedRequest(items=[RequestItem(text='200 l milk', product_query='milk', quantity=200, unit='L')],
+                               delivery_date=date(2026, 11, 20), parser='claude')
+        with patch.object(gateway_app, 'parse_conversation', AsyncMock(return_value=(parsed, '', 5))):
+            result = self.client.post('/api/chat', json={'messages': [{'role': 'buyer', 'text': '200 l milk Friday'}]}).json()
+        self.assertEqual(result['kind'], 'offer')
+        self.assertIsNone(result['notice'])
 
     def test_buyer_can_skip_the_questions(self):
         first = self.client.post('/api/chat', json={'messages': [{'role': 'buyer', 'text': 'I need milk'}]}).json()
@@ -107,9 +162,49 @@ class ChatEndpointTests(unittest.TestCase):
                                                       'understood': first['understood'], 'skip_questions': True}).json()
         self.assertEqual(skipped['kind'], 'offer')
 
-    def test_valio_staff_cannot_use_the_buyer_chat(self):
-        self.client.post('/api/session/login', json={'role': 'valio', 'name': 'Anna'})
-        self.assertEqual(self.client.post('/api/chat', json={'messages': [{'role': 'buyer', 'text': 'milk'}]}).status_code, 403)
+
+class CancelIntentTests(unittest.TestCase):
+    def test_recognised_in_three_languages_with_or_without_a_number(self):
+        cases = {"Cancel my last order": None, "cancel order O-0009": "O-0009", "please cancel o9": "O-0009",
+                 "Peruuta tilaus": None, "Jag vill avbeställa min beställning": None}
+        for text, order_id in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(dialogue.cancel_intent(text), {"order_id": order_id})
+
+    def test_not_a_cancellation(self):
+        for text in ("cancel", "Don't cancel my order", "200 kg perunaa for Friday", "I want to order milk"):
+            with self.subTest(text=text):
+                self.assertIsNone(dialogue.cancel_intent(text))
+
+
+class CancelInChatTests(ChatCase):
+    def setUp(self):
+        super().setUp()
+        now = datetime.now(TZ)
+        line = OrderLine(item_index=0, product_id="milk", name="Milk", quantity=10, sales_unit="ST", unit_price=1.0,
+                         line_total=10.0, delivery_date=now.date() + timedelta(days=5))
+        gateway_app.S.store.save_order(Order(
+            id="O-0001", offer_id="OF-gone", customer_id="C-1001", customer_name="Hotel Aurora Helsinki", created_at=now,
+            status="placed", lines=[line], total=10.0,
+            decision=Decision(outcome="auto_approve", summary="ok", checks=[], total=10.0)))
+
+    def say(self, text):
+        return self.client.post("/api/chat", json={"messages": [{"role": "buyer", "text": text}]}).json()
+
+    def test_cancel_the_latest_order_after_confirming(self):
+        reply = self.say("Please cancel my last order, the event was called off")
+        self.assertEqual((reply["kind"], reply["order"]["id"]), ("cancel", "O-0001"))
+        self.assertIn("Do you want me to cancel order O-0001", reply["question"])
+        self.assertEqual(gateway_app.S.store.orders["O-0001"].status, "placed")  # nothing happens before confirming
+        self.client.post("/api/orders/O-0001/cancel", json={"reason": "the event was called off"}).raise_for_status()
+        again = self.say("cancel my order")
+        self.assertEqual(again["kind"], "answer")
+        self.assertIn("no placed order", again["text"])
+
+    def test_unknown_or_finished_orders(self):
+        self.assertIn("can't find order O-0099", self.say("cancel order O-0099")["text"])
+        gateway_app.S.store.orders["O-0001"].status = "rejected"
+        self.assertIn("was not placed", self.say("cancel order O-1")["text"])
 
 
 if __name__ == '__main__':

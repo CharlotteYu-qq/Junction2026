@@ -136,6 +136,16 @@ class CustomerRegistry:
         c.avg_order_value = round((prev_total + total) / c.past_orders, 2)
         self._save()
 
+    def undo_order(self, customer_id: str, total: float) -> None:
+        """A cancelled order no longer counts towards the customer's history."""
+        c = self._customers[customer_id]
+        if c.past_orders <= 0:
+            return
+        remaining = (c.avg_order_value or 0.0) * c.past_orders - total
+        c.past_orders -= 1
+        c.avg_order_value = round(max(remaining, 0.0) / c.past_orders, 2) if c.past_orders else None
+        self._save()
+
 
 def trust_profile(c: Customer) -> dict:
     """Readable explanation of why we trust (or don't yet trust) this customer."""

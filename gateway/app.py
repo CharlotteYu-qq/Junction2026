@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from agent import rules_parser
+from agent import dialogue, rules_parser
 from agent.service import claude_available, parse_conversation, parse_request
 from contracts import vocab
 from contracts.models import Customer, Offer, Order, ParsedRequest
@@ -69,7 +69,7 @@ app = FastAPI(
 )
 
 
-# ----------------------------------------------------------------------------- sign-in: buyer portal and Valio admin
+# ----------------------------------------------------------------------------- sign-in: the buyer portal
 
 OPEN_API = ("/api/health", "/api/session")
 
@@ -101,21 +101,13 @@ def buyer(request: Request) -> Principal:
     return who
 
 
-def valio_staff(request: Request) -> Principal:
-    who = signed_in(request)
-    if who.role != "valio":
-        raise HTTPException(403, "Only Valio Aimo staff can do this")
-    return who
-
-
 def _passwords_required() -> bool:
-    return bool(settings.buyer_password or settings.valio_password)
+    return bool(settings.buyer_password)
 
 
 class LoginIn(BaseModel):
-    role: Literal["buyer", "valio"]
-    customer_id: str = Field(default="", max_length=20)  # buyer portal: which customer
-    name: str = Field(default="", max_length=60)  # Valio admin: the staff member's name, recorded with decisions
+    role: Literal["buyer"] = "buyer"
+    customer_id: str = Field(max_length=20)  # which customer the buyer orders for
     password: str = Field(default="", max_length=200)
 
 
@@ -135,23 +127,16 @@ def get_session(request: Request):
 
 @app.post("/api/session/login", tags=["session"])
 def login(body: LoginIn, request: Request, response: Response):
-    """Sign in to the buyer portal (as one customer) or to the Valio Aimo admin (as a named staff member)."""
-    if body.role == "buyer":
-        c = S.customers.get(body.customer_id.strip())
-        if not c:
-            raise HTTPException(400, "Choose your company")
-        who, expected = Principal(role="buyer", name=c.name, customer_id=c.id), settings.buyer_password
-    else:
-        name = " ".join(body.name.replace(":", " ").split())
-        if not name:
-            raise HTTPException(400, "Enter your name: it is recorded with your decisions")
-        who, expected = Principal(role="valio", name=name), settings.valio_password
-    if _passwords_required() and (not expected or not password_ok(body.password, expected)):
-        raise HTTPException(401, "Wrong password" if expected else "This sign-in is not set up on the server")
+    """Sign in to the buyer portal as one customer."""
+    c = S.customers.get(body.customer_id.strip())
+    if not c:
+        raise HTTPException(400, "Choose your company")
+    who = Principal(role="buyer", name=c.name, customer_id=c.id)
+    if _passwords_required() and not password_ok(body.password, settings.buyer_password):
+        raise HTTPException(401, "Wrong password")
     response.set_cookie(COOKIE, S.sessions.issue(who), max_age=SESSION_SECONDS, httponly=True, samesite="lax",
                         secure=request.url.scheme == "https", path="/")
-    portal = "the buyer portal" if who.role == "buyer" else "the Valio Aimo admin"
-    S.audit.append(who.actor, "session.signed_in", who.customer_id or "valio-admin", f"{who.name} signed in to {portal}")
+    S.audit.append(who.actor, "session.signed_in", c.id, f"{c.name} signed in to the buyer portal")
     return {"signed_in": True, "role": who.role, "name": who.name, "customer_id": who.customer_id}
 
 
@@ -227,11 +212,12 @@ def well_known():
         "openapi": "/openapi.json",
         "docs": "/docs",
         "flow": [
-            "POST /api/session/login {role: buyer, customer_id, password} - session cookie for the buyer portal",
-            "POST /api/requests  - natural-language need -> signed fixed-price offer + policy preview",
+            "POST /api/session/login {customer_id, password} - session cookie for the buyer portal",
+            "POST /api/chat - talk to the ordering agent: a follow-up question, or a signed fixed-price offer + policy preview",
             "POST /api/offers/{id}/evaluate - preview the decision for other selections",
-            "POST /api/orders - commit an offer: placed | pending_approval | rejected",
-            "GET  /api/audit - readable, hash-chained record of every step",
+            "POST /api/orders - commit an offer: placed | rejected; outside the agent's authority it needs "
+            "approved_by (the full name of the approving person in the customer's organisation)",
+            "POST /api/orders/{id}/cancel - cancel a placed order until the order cut-off of its delivery",
         ],
         "offer_signing": {
             "algorithm": "Ed25519",
@@ -259,45 +245,10 @@ def well_known():
 # ----------------------------------------------------------------------------- customers
 
 
-class CustomerIn(BaseModel):
-    name: str = Field(min_length=2, max_length=120)
-    segment: str = Field(default="restaurant", max_length=60)
-    business_id: str = Field(default="", max_length=20)
-
-
 @app.get("/api/customers", tags=["customers"])
-def list_customers(who: Principal = Depends(signed_in)):
-    """Valio Aimo staff see every customer; a buyer sees only its own record."""
-    if who.role == "buyer":
-        return [_customer_out(_customer(who.customer_id))]
-    return [_customer_out(c) for c in S.customers.all()]
-
-
-@app.post("/api/customers", tags=["customers"])
-def register_customer(body: CustomerIn, who: Principal = Depends(valio_staff)):
-    c = S.customers.register(body.name, body.segment, body.business_id)
-    S.audit.append(
-        who.actor, "customer.registered", c.id,
-        f"{who.name} registered new customer {c.name} (business ID {c.business_id or 'missing'}, checksum "
-        f"{'OK' if c.business_id_valid else 'failed'}): not on the whitelist yet",
-        {"business_id": c.business_id, "business_id_valid": c.business_id_valid},
-    )
-    return _customer_out(c)
-
-
-@app.post("/api/customers/{customer_id}/verify", tags=["customers"])
-def verify_customer(customer_id: str, who: Principal = Depends(valio_staff)):
-    c = _customer(customer_id)
-    if c.status == "trusted":
-        return _customer_out(c)
-    if not c.business_id_valid:
-        raise HTTPException(400, "The business ID fails the Y-tunnus checksum: fix it before verifying")
-    c = S.customers.verify(customer_id)
-    S.audit.append(
-        who.actor, "customer.whitelisted", c.id,
-        f"{who.name} verified {c.name} and added it to the whitelist (auto-approval limit €{c.auto_approve_limit:,.0f})",
-    )
-    return _customer_out(c)
+def list_customers(who: Principal = Depends(buyer)):
+    """The signed-in buyer's own customer record (never anyone else's)."""
+    return [_customer_out(_customer(who.customer_id))]
 
 
 # ----------------------------------------------------------------------------- requests & offers
@@ -334,7 +285,16 @@ async def create_request(body: RequestIn, who: Principal = Depends(buyer)):
             text, _today(), api_key=settings.anthropic_api_key, mode=settings.parser, model=settings.claude_model
         )
         _audit_understood(customer, parsed)
-    return await _offer_response(customer, parsed, text, parse_ms)
+    return {**await _offer_response(customer, parsed, text, parse_ms), "notice": _parser_notice(parsed)}
+
+
+RULES_NOTICE = ("Our AI assistant is unavailable right now, so a simpler rule-based reader understood this request. "
+                "Please double-check the products, quantities and delivery day before you order.")
+
+
+def _parser_notice(parsed: ParsedRequest) -> Optional[str]:
+    """Claude is always configured, so the rule-based parser means it could not be reached: remind the buyer."""
+    return RULES_NOTICE if parsed.parser == "rules" else None
 
 
 def _audit_understood(customer: Customer, parsed: ParsedRequest) -> None:
@@ -379,7 +339,8 @@ class ChatIn(BaseModel):
 @app.post("/api/chat", tags=["ordering"])
 async def chat(body: ChatIn, who: Principal = Depends(buyer)):
     """Talk to the ordering agent. While a quantity, unit or delivery date is missing (or a condition is
-    unclear) it answers with a question; once the request is complete it returns a signed offer."""
+    unclear) it answers with a question; once the request is complete it returns a signed offer. Asking to
+    cancel an order ("cancel my last order") returns that order for the buyer to confirm (kind "cancel")."""
     if body.messages[-1].role != "buyer":
         raise HTTPException(400, "The last message must be the buyer's")
     customer = _customer(who.customer_id)
@@ -389,6 +350,9 @@ async def chat(body: ChatIn, who: Principal = Depends(buyer)):
         parsed, parse_ms = body.understood, 0  # nothing new was said: use what the agent already understood
     else:
         S.audit.append(who.actor, "request.received", customer.id, f"{customer.name} said: “{_clip(turns[-1][1], 180)}”")
+        cancel = dialogue.cancel_intent(turns[-1][1])
+        if cancel is not None:
+            return _cancel_reply(who, cancel["order_id"])
         parsed, question, parse_ms = await parse_conversation(
             turns, body.understood, _today(), api_key=settings.anthropic_api_key, mode=settings.parser,
             model=settings.claude_model,
@@ -396,10 +360,39 @@ async def chat(body: ChatIn, who: Principal = Depends(buyer)):
         if question and not body.skip_questions:
             S.audit.append("agent", "agent.asked", customer.id, f"Agent asked {customer.name}: “{_clip(question, 180)}”",
                            {"parser": parsed.parser})
-            return {"kind": "question", "question": question, "understood": parsed.model_dump(mode="json")}
+            return {"kind": "question", "question": question, "understood": parsed.model_dump(mode="json"),
+                    "notice": _parser_notice(parsed)}
     _need_catalog()
     _audit_understood(customer, parsed)
-    return {"kind": "offer", **await _offer_response(customer, parsed, request_text, parse_ms)}
+    return {"kind": "offer", **await _offer_response(customer, parsed, request_text, parse_ms),
+            "notice": _parser_notice(parsed)}
+
+
+def _cancel_reply(who: Principal, order_id: Optional[str]) -> dict:
+    """The order the buyer asked to cancel, for them to confirm; or why there is nothing to cancel."""
+    mine = [o for o in S.store.list_orders() if o.customer_id == who.customer_id]  # newest first
+    now = datetime.now(TZ)
+    if order_id:
+        order = next((o for o in mine if o.id == order_id), None)
+        if order is None:
+            return {"kind": "answer", "text": f"I can't find order {order_id} among your orders."}
+    else:
+        order = next((o for o in mine if o.status == "placed" and now < _cancel_deadline(o)), None)
+        if order is None:
+            return {"kind": "answer", "text": "You have no placed order that can still be cancelled."}
+    if order.status != "placed":
+        state = {"cancelled": "is already cancelled", "rejected": "was not placed",
+                 "pending_approval": "is still waiting for approval"}.get(order.status, f"is {order.status}")
+        return {"kind": "answer", "text": f"Order {order.id} {state}, so there is nothing to cancel."}
+    deadline = _cancel_deadline(order)
+    if now >= deadline:
+        return {"kind": "answer", "text": f"Order {order.id} can no longer be cancelled: the order cut-off was {deadline:%a %d %b %H:%M}."}
+    what = "; ".join(f"{line.quantity:,.10g} × {line.name}" for line in order.lines)
+    day = min((line.delivery_date for line in order.lines), default=None)
+    question = (f"Do you want me to cancel order {order.id} ({what}, {eur(order.total)}"
+                + (f", delivery {day:%a %d %b}" if day else "") + f")? You can cancel it until {deadline:%a %d %b %H:%M}.")
+    S.audit.append("agent", "agent.asked", order.id, f"Agent asked {who.name} to confirm cancelling {order.id}")
+    return {"kind": "cancel", "question": question, "order": _order_out(order)}
 
 
 @app.get("/api/offers/{offer_id}", tags=["ordering"])
@@ -420,14 +413,18 @@ def evaluate_offer(offer_id: str, body: SelectionIn, who: Principal = Depends(si
 
 class OrderIn(BaseModel):
     offer_id: str
-    selections: dict[int, str] = Field(default_factory=dict)
+    selections: dict[int, str] = Field(default_factory=dict)  # item index -> product id; default: the agent's pick
     rationale: str = Field(default="", max_length=2000)
+    # Above the agent's authority, a person in the customer's organisation approves by typing their full name.
+    approved_by: str = Field(default="", max_length=80)
 
 
-class DecisionIn(BaseModel):
-    decision: Literal["approve", "reject"]  # the reviewer is the signed-in Valio Aimo staff member
-    comment: str = Field(default="", max_length=500)
-    verify_customer: bool = False
+def _approver_name(raw: str) -> str:
+    """The approving person's full name: at least a first and a last name (a deliberate double-check)."""
+    name = " ".join(raw.replace(":", " ").split())
+    if len(name.split()) < 2:
+        raise HTTPException(400, "Type the approving person's first and last name")
+    return name
 
 
 def _order_out(o: Order) -> dict:
@@ -437,12 +434,30 @@ def _order_out(o: Order) -> dict:
         **o.model_dump(mode="json"),
         "customer_trust": trust_profile(c) if c else None,
         "offer_valid_until": offer.valid_until.isoformat() if offer else None,
+        "cancellable_until": _cancel_deadline(o).isoformat() if o.status == "placed" else None,
     }
+
+
+def _cancel_deadline(order: Order) -> datetime:
+    """A placed order can be cancelled until the order cut-off of its delivery (the earliest across its lines).
+    Without a known cut-off, until the start of the delivery day."""
+    offer = S.store.offers.get(order.offer_id)
+    cutoffs = []
+    for line in order.lines if offer else []:
+        item = offer.items[line.item_index] if line.item_index < len(offer.items) else None
+        cand = next((c for c in item.candidates if c.product_id == line.product_id), None) if item else None
+        if cand and cand.availability.closing_time:
+            cutoffs.append(cand.availability.closing_time)
+    if cutoffs:
+        return min(cutoffs)
+    first_day = min((line.delivery_date for line in order.lines), default=order.created_at.date())
+    return datetime.combine(first_day, datetime.min.time(), tzinfo=TZ)
 
 
 @app.post("/api/orders", tags=["ordering"])
 def place_order(body: OrderIn, who: Principal = Depends(buyer)):
-    """Commit an offer. The policy decides: placed (within authority), pending_approval, or rejected."""
+    """Commit an offer. Within the agent's authority it is placed at once. Above it, a person in the customer's
+    organisation must approve: `approved_by` is their full name. Hard rules are never waived (rejected)."""
     offer = _offer(body.offer_id, who)
     customer = _customer(offer.customer_id)
     used = next((o for o in S.store.orders.values() if o.offer_id == offer.id), None)
@@ -450,11 +465,17 @@ def place_order(body: OrderIn, who: Principal = Depends(buyer)):
         raise HTTPException(409, f"Offer {offer.id} was already used for order {used.id}")
     now = datetime.now(TZ)
     decision, lines = evaluate(customer, offer, body.selections, now, verify_offer(offer, S.signer))
-    status = {"auto_approve": "placed", "needs_approval": "pending_approval", "reject": "rejected"}[decision.outcome]
+    approver = None
+    if decision.outcome == "needs_approval":
+        if not body.approved_by.strip():
+            raise HTTPException(409, "This order is outside the agent's authority: a person must approve it with their full name")
+        approver = _approver_name(body.approved_by)
+    status = "rejected" if decision.outcome == "reject" else "placed"
     order = Order(
         id=S.store.next_order_id(), offer_id=offer.id, customer_id=customer.id, customer_name=customer.name,
         created_at=now, status=status, lines=lines, total=decision.total, decision=decision,
         rationale=body.rationale.strip(), request_text=offer.request_text,
+        reviewer=approver, reviewed_at=now if approver else None,
     )
     S.store.save_order(order)
     failed = [c for c in decision.checks if not c.passed and c.severity != "info"]
@@ -466,82 +487,55 @@ def place_order(body: OrderIn, who: Principal = Depends(buyer)):
     )
     lines_text = "; ".join(f"{l.quantity:,.10g} × {l.name}" for l in lines)
     data = {"offer_id": offer.id, "rationale": order.rationale, "lines": [l.model_dump(mode="json") for l in lines]}
-    if status == "placed":
+    simulated = "(simulated: the mock backend has no order endpoint)"
+    if status == "placed" and approver:
+        reasons = [c.message for c in decision.checks if not c.passed and c.severity == "review"]
         S.customers.record_order(customer.id, order.total)
-        S.audit.append("agent", "order.placed", order.id,
-                       f"{order.id} placed automatically for {customer.name}: {lines_text} = {eur(order.total)} (simulated: the mock backend has no order endpoint)", data)
-    elif status == "pending_approval":
-        S.audit.append("agent", "order.sent_for_approval", order.id,
-                       f"{order.id} for {customer.name} sent to Valio Aimo for approval ({eur(order.total)})", data)
+        S.audit.append(f"human:{approver}", "order.approved", order.id,
+                       f"{approver} approved {order.id} for {customer.name} ({eur(order.total)}), outside the agent's "
+                       f"authority: " + "; ".join(reasons[:3]), {**data, "approved_by": approver, "reasons": reasons})
+        S.audit.append(who.actor, "order.placed", order.id,
+                       f"{order.id} placed for {customer.name} after approval by {approver}: {lines_text} = {eur(order.total)} {simulated}", data)
+    elif status == "placed":
+        S.customers.record_order(customer.id, order.total)
+        S.audit.append(who.actor, "order.placed", order.id,
+                       f"{order.id} placed for {customer.name}, within the agent's authority: {lines_text} = {eur(order.total)} {simulated}", data)
     else:
         S.audit.append("agent", "order.rejected", order.id, f"{order.id} not placed: {decision.summary}", data)
     return _order_out(order)
 
 
 @app.get("/api/orders", tags=["ordering"])
-def list_orders(status: Optional[str] = None, who: Principal = Depends(signed_in)):
-    """Valio Aimo staff see every order; a buyer sees only its own."""
-    orders = S.store.list_orders(status)
-    if who.role == "buyer":
-        orders = [o for o in orders if o.customer_id == who.customer_id]
-    return [_order_out(o) for o in orders]
+def list_orders(status: Optional[str] = None, who: Principal = Depends(buyer)):
+    """The signed-in buyer's own orders."""
+    return [_order_out(o) for o in S.store.list_orders(status) if o.customer_id == who.customer_id]
 
 
-@app.post("/api/orders/{order_id}/decision", tags=["approvals"])
-def decide_order(order_id: str, body: DecisionIn, who: Principal = Depends(valio_staff)):
-    """Valio Aimo staff approve or reject an order the agent could not place on its own."""
+class CancelIn(BaseModel):
+    reason: str = Field(default="", max_length=300)
+
+
+@app.post("/api/orders/{order_id}/cancel", tags=["ordering"])
+def cancel_order(order_id: str, body: Optional[CancelIn] = None, who: Principal = Depends(buyer)):
+    """Cancel one of your placed orders, until the order cut-off of its delivery."""
     order = S.store.orders.get(order_id)
-    if not order:
+    if not order or order.customer_id != who.customer_id:
         raise HTTPException(404, f"Unknown order {order_id}")
-    if order.status != "pending_approval":
-        raise HTTPException(409, f"{order_id} is already {order.status}")
-    customer = _customer(order.customer_id)
-    reviewer = who.name.strip()
-    comment = body.comment.strip()
-    if not reviewer:
-        raise HTTPException(400, "The reviewer needs a name: sign in again")
+    if order.status != "placed":
+        raise HTTPException(409, f"{order_id} is {order.status.replace('_', ' ')}: only a placed order can be cancelled")
     now = datetime.now(TZ)
-    if body.decision == "approve":
-        # Approval grants authority; it cannot waive hard rules or revive an expired offer.
-        offer = _offer(order.offer_id)
-        selections = {line.item_index: line.product_id for line in order.lines}
-        decision, lines = evaluate(customer, offer, selections, now, verify_offer(offer, S.signer))
-        if decision.outcome == "reject":
-            S.audit.append(f"human:{reviewer}", "order.approval_blocked", order.id,
-                           f"Approval of {order.id} blocked: {decision.summary}")
-            raise HTTPException(409, decision.summary)
-        old_lines = [line.model_dump(mode="json") for line in order.lines]
-        if decision.total != order.total or [line.model_dump(mode="json") for line in lines] != old_lines:
-            raise HTTPException(409, "The order changed since review; request a new offer and approval")
-        if body.verify_customer and customer.status == "unverified":
-            if not customer.business_id_valid:
-                raise HTTPException(400, "The business ID fails the checksum: can't add this customer to the whitelist")
-            customer = S.customers.verify(customer.id)
-            S.audit.append(f"human:{reviewer}", "customer.whitelisted", customer.id,
-                           f"{reviewer} verified {customer.name} and added it to the whitelist (auto-approval limit €{customer.auto_approve_limit:,.0f})")
-        order.status = "placed"
-        order.decision = decision
-        S.customers.record_order(customer.id, order.total)
-        S.audit.append(f"human:{reviewer}", "order.approved", order.id,
-                       f"{reviewer} approved {order.id} for {customer.name} ({eur(order.total)})" + (f": “{_clip(comment, 120)}”" if comment else ""),
-                       {"comment": comment})
-    else:
-        order.status = "rejected"
-        S.audit.append(f"human:{reviewer}", "order.rejected_by_person", order.id,
-                       f"{reviewer} rejected {order.id} for {customer.name}" + (f": “{_clip(comment, 120)}”" if comment else ""),
-                       {"comment": comment})
-    order.reviewer, order.reviewed_at, order.review_comment = reviewer, now, comment or None
+    deadline = _cancel_deadline(order)
+    if now >= deadline:
+        raise HTTPException(409, f"Too late to cancel {order_id}: the order cut-off was {deadline:%a %d %b %H:%M}")
+    reason = (body.reason if body else "").strip()
+    order.status, order.cancelled_at, order.cancel_reason = "cancelled", now, reason or None
     S.store.save_order(order)
+    S.customers.undo_order(order.customer_id, order.total)
+    S.audit.append(who.actor, "order.cancelled", order.id,
+                   f"{who.name} cancelled {order.id} ({eur(order.total)})" + (f": “{_clip(reason, 120)}”" if reason else "")
+                   + " (simulated: the mock backend has no order endpoint)",
+                   {"reason": reason, "cancellable_until": deadline.isoformat()})
     return _order_out(order)
-
-
-# ----------------------------------------------------------------------------- audit
-
-
-@app.get("/api/audit", tags=["audit"])
-def get_audit(subject: Optional[str] = None, who: Principal = Depends(valio_staff)):
-    events = S.audit.events(subject)
-    return {"chain": S.audit.verify(), "events": [e.model_dump(mode="json") for e in reversed(events)]}
 
 
 # ----------------------------------------------------------------------------- catalog explorer
@@ -616,120 +610,6 @@ def catalog_search(
     }
 
 
-def _catalog_analytics(products: list[dict]) -> dict:
-    categories: dict[str, list[dict]] = defaultdict(list)
-    countries: dict[str, list[dict]] = defaultdict(list)
-    for product in products:
-        categories[product.get("category") or "unknown"].append(product)
-        countries[(product.get("country") or "unknown").lower()].append(product)
-
-    def measures(key: str, items: list[dict]) -> dict:
-        values = [p[key] for p in items if p.get(key) is not None]
-        return {"count": len(values), "average": _mean(values)}
-
-    category_stats = []
-    for code, items in categories.items():
-        carbon = measures("co2", items)
-        reliability = measures("reliability", items)
-        category_stats.append({
-            "category": code,
-            "products": len(items),
-            "carbon_products": carbon["count"],
-            "avg_co2": carbon["average"],
-            "reliability_products": reliability["count"],
-            "avg_reliability": reliability["average"],
-        })
-    category_stats.sort(key=lambda x: (-x["products"], x["category"]))
-
-    country_stats = []
-    for code, items in countries.items():
-        carbon = measures("co2", items)
-        reliability = measures("reliability", items)
-        country_stats.append({
-            "code": code,
-            "products": len(items),
-            "carbon_products": carbon["count"],
-            "avg_co2": carbon["average"],
-            "reliability_products": reliability["count"],
-            "avg_reliability": reliability["average"],
-        })
-    country_stats.sort(key=lambda x: (-x["products"], x["code"]))
-
-    carbon = measures("co2", products)
-    reliability = measures("reliability", products)
-    return {
-        "summary": {
-            "products": len(products),
-            "categories": len(category_stats),
-            "countries": len(country_stats),
-            "carbon_products": carbon["count"],
-            "avg_co2": carbon["average"],
-            "reliability_products": reliability["count"],
-            "avg_reliability": reliability["average"],
-        },
-        "categories": category_stats,
-        "countries": country_stats,
-    }
-
-
-@app.get("/api/admin/analytics", tags=["analytics"])
-def admin_analytics(who: Principal = Depends(valio_staff)):
-    """Full assortment aggregates for Valio Aimo staff; contains no customer or order records."""
-    _need_catalog()
-    return _catalog_analytics(S.catalog.products)
-
-
-def _market_watchlist(products: list[dict], limit: int = 12) -> list[dict]:
-    """Select a small, varied set for a live operational check."""
-    selected: list[dict] = []
-    seen_categories: set[str] = set()
-    for product in products:
-        category = product.get("category") or "unknown"
-        if category not in seen_categories:
-            selected.append(product)
-            seen_categories.add(category)
-        if len(selected) == limit:
-            break
-    return selected
-
-
-@app.get("/api/admin/market-snapshot", tags=["analytics"])
-async def admin_market_snapshot(who: Principal = Depends(valio_staff)):
-    """Bounded live price and availability watchlist for Valio Aimo operators."""
-    _need_catalog()
-    products = _market_watchlist(S.catalog.products)
-    requested = datetime.now(TZ).date()
-    ids = [product["id"] for product in products]
-    try:
-        prices, _ = await S.valio.price(ids, requested, "C-0000")
-        availability, meta = await S.valio.availability(ids, requested, "C-0000")
-    except ValioAPIError as e:
-        raise HTTPException(502, f"Live market snapshot unavailable: {e}") from e
-
-    checked_at = _parse_dt(meta.get("time_now")) or datetime.now(TZ)
-    items = []
-    for product in products:
-        price = _price_info(prices.get(product["id"]))
-        stock = _availability(availability.get(product["id"]), None, requested, checked_at)
-        items.append({
-            "id": product["id"], "name": product["name"], "category": product.get("category") or "unknown",
-            "sales_unit": product["sales_unit"], "unit_price": price.unit_price,
-            "availability": stock.status, "logistic_model": stock.logistic_model,
-            "available_amount": stock.available_amount,
-        })
-
-    priced = [item["unit_price"] for item in items if item["unit_price"] is not None]
-    return {
-        "requested_date": requested.isoformat(), "checked_at": checked_at.isoformat(), "items": items,
-        "summary": {
-            "monitored": len(items), "priced": len(priced), "avg_unit_price": _mean(priced),
-            "available": sum(item["availability"] == "ok" for item in items),
-            "terminal": sum(item["logistic_model"] == "Terminal" for item in items),
-            "attention": sum(item["availability"] in {"partial", "late", "cutoff_passed", "unavailable", "unknown"} for item in items),
-        },
-    }
-
-
 class QuoteIn(BaseModel):
     product_ids: list[str] = Field(min_length=1, max_length=20)
     requested_date: date
@@ -753,20 +633,6 @@ async def catalog_quote(body: QuoteIn, who: Principal = Depends(signed_in)):
         }
         for pid in body.product_ids
     }
-
-
-# ----------------------------------------------------------------------------- admin
-
-
-@app.post("/api/admin/reset", tags=["meta"])
-def reset_demo(who: Principal = Depends(valio_staff)):
-    """Restore the demo customers and clear offers, orders and the audit trail (Valio Aimo staff only)."""
-    S.customers.reset()
-    S.store.reset()
-    S.audit.reset()
-    S.audit.append(who.actor, "demo.reset", "system",
-                   f"{who.name} reset the demo data: demo customers restored, orders and audit trail cleared")
-    return {"ok": True}
 
 
 # The web UI. Mounted last so every /api route above takes precedence.

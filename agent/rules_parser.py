@@ -41,7 +41,16 @@ def _next_weekday(today: date, wd: int) -> date:
 
 
 def _future(d: date, today: date) -> date:
-    return d if d >= today else d.replace(year=d.year + 1)
+    """A date written without a year: this year, or next year when it is long past ("5.1." in December).
+    A date that passed recently ("10.11." on 14.11.) is kept, so it is flagged instead of moved a year."""
+    return d if d >= today or (today - d).days <= 180 else d.replace(year=d.year + 1)
+
+
+def _day_of_month(day: int, today: date) -> date:
+    """"the 25th": this month if still ahead, otherwise next month."""
+    if day >= today.day:
+        return date(today.year, today.month, day)
+    return date(today.year + (today.month == 12), today.month % 12 + 1, day)
 
 
 def extract_date(text: str, today: date) -> tuple[date | None, str]:
@@ -64,6 +73,8 @@ def extract_date(text: str, today: date) -> tuple[date | None, str]:
          lambda m: _future(date(today.year, _MONTHS.index(m.group(2).lower()[:3]) + 1, int(m.group(1))), today)),
         (re.compile(rf"\b{_CUE}({'|'.join(_MONTHS)})[a-z]*\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I),
          lambda m: _future(date(today.year, _MONTHS.index(m.group(1).lower()[:3]) + 1, int(m.group(2))), today)),
+        # "on the 25th" (an ordinal is required, so "25 kg" is never a date)
+        (re.compile(rf"\b{_CUE}(?:the\s+)?(\d{{1,2}})(?:st|nd|rd|th)\b", re.I), lambda m: _day_of_month(int(m.group(1)), today)),
     ]
     for rx, resolve in patterns:
         m = rx.search(text)
@@ -223,6 +234,7 @@ _FILLER = set(
     requirements requirement based on price prices and availability available best cheapest good quality for kitchen delivered
     delivery deliver by can could total in with which is are be it this these those also too just only fresh our new can't
     we'd i'd let's let us hello hi thanks thank enough per week weekly each every all everything must should products product
+    actually make change instead add extra sorry meant mean
     tarvitsen tarvitsemme tarvitaan haluaisin haluamme tilaan tilata tilaamme noin vähintään kiitos meille toimitus toimitettuna
     mennessä ja sekä myös hyvä halvin""".split()
 )
@@ -321,6 +333,9 @@ def parse(text: str, today: date) -> ParsedRequest:
     warnings: list[str] = []
     work = normalise_numbers(text)
     delivery, work = extract_date(work, today)
+    if delivery is not None and delivery < today:
+        warnings.append(f"The delivery date {delivery:%d.%m.%Y} has passed: please choose another day")
+        delivery = None  # ask again rather than order for a past date (or silently for next year)
     work, budget, substitutions, clarification, control_warnings = extract_controls(work)
     warnings.extend(control_warnings)
     assumed = delivery is None

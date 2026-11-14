@@ -1,4 +1,4 @@
-"""Sign-in: the buyer portal and the Valio Aimo admin are separate, and the server enforces it."""
+"""Sign-in: buyers see only their own company's data, and the server enforces it."""
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -51,7 +51,7 @@ class PortalTests(unittest.TestCase):
                                sessions=SessionSigner(runtime / 'session_secret'))
         state.start()
         self.addCleanup(state.stop)
-        self.use_passwords(buyer='buyer-pw', valio='valio-pw')
+        self.use_passwords(buyer='buyer-pw')
         now = datetime.now(TZ)
         for customer, n in (('C-1001', 1), ('C-1002', 2)):
             offer = Offer(id=f'OF-{customer}', customer_id=customer, created_at=now, valid_until=now + timedelta(minutes=30),
@@ -63,8 +63,8 @@ class PortalTests(unittest.TestCase):
                 decision=Decision(outcome='needs_approval', summary='needs a person', checks=[], total=0.0)))
         self.client = TestClient(gateway_app.app)
 
-    def use_passwords(self, buyer='', valio=''):
-        p = patch.object(gateway_app, 'settings', replace(settings, buyer_password=buyer, valio_password=valio))
+    def use_passwords(self, buyer=''):
+        p = patch.object(gateway_app, 'settings', replace(settings, buyer_password=buyer))
         p.start()
         self.addCleanup(p.stop)
 
@@ -79,22 +79,28 @@ class PortalTests(unittest.TestCase):
         self.assertEqual({c['id'] for c in session['customers']}, {'C-1001', 'C-1002', 'C-2001'})
 
     def test_wrong_password_is_rejected(self):
-        self.assertEqual(self.login(role='buyer', customer_id='C-1001', password='nope').status_code, 401)
-        self.assertEqual(self.login(role='valio', name='Anna', password='buyer-pw').status_code, 401)
+        self.assertEqual(self.login(customer_id='C-1001', password='nope').status_code, 401)
         self.assertEqual(self.client.get('/api/orders').status_code, 401)
 
-    def test_buyer_sees_only_its_own_data_and_cannot_use_admin(self):
-        self.assertEqual(self.login(role='buyer', customer_id='C-1001', password='buyer-pw').status_code, 200)
+    def test_buyer_sees_only_its_own_data(self):
+        self.assertEqual(self.login(customer_id='C-1001', password='buyer-pw').status_code, 200)
         self.assertEqual([c['id'] for c in self.client.get('/api/customers').json()], ['C-1001'])
         self.assertEqual([o['id'] for o in self.client.get('/api/orders').json()], ['O-0001'])
         self.assertEqual(self.client.get('/api/offers/OF-C-1002').status_code, 404)
         self.assertEqual(self.client.post('/api/requests', json={'customer_id': 'C-1002', 'text': 'milk'}).status_code, 403)
-        self.assertEqual(self.client.post('/api/orders/O-0001/decision', json={'decision': 'approve'}).status_code, 403)
-        self.assertEqual(self.client.get('/api/audit').status_code, 403)
-        self.assertEqual(self.client.post('/api/admin/reset').status_code, 403)
-        self.assertEqual(self.client.post('/api/customers/C-2001/verify').status_code, 403)
 
-    def test_analytics_are_admin_only_and_explore_returns_aggregates(self):
+    def test_the_valio_admin_is_gone(self):
+        self.assertEqual(self.login(role='valio', name='Anna', password='buyer-pw').status_code, 422)
+        self.login(customer_id='C-1001', password='buyer-pw')
+        for method, path in (('post', '/api/orders/O-0001/decision'), ('get', '/api/audit'), ('post', '/api/admin/reset'),
+                             ('post', '/api/customers/C-2001/verify'), ('get', '/api/admin/analytics'),
+                             ('get', '/api/admin/market-snapshot')):
+            with self.subTest(path=path):
+                self.assertIn(getattr(self.client, method)(path).status_code, (404, 405))
+        old_admin = gateway_app.S.sessions.issue(Principal(role='valio', name='Anna'))
+        self.assertIsNone(gateway_app.S.sessions.read(old_admin))  # admin sessions from before end
+
+    def test_explore_returns_aggregates_only(self):
         products = [
             {"id": "secret-1", "name": "Milk Alpha", "name_fi": "", "category": "dairy", "country": "fi",
              "co2": 1.5, "reliability": 0.9, "claims": [], "labels": []},
@@ -102,10 +108,8 @@ class PortalTests(unittest.TestCase):
              "co2": 2.5, "reliability": None, "claims": [], "labels": []},
         ]
         with patch.object(gateway_app.S, 'catalog', Catalog(products)):
-            self.assertEqual(self.client.get('/api/admin/analytics').status_code, 401)
             self.assertEqual(self.client.get('/api/catalog/search?q=milk').status_code, 401)
-            self.login(role='buyer', customer_id='C-1001', password='buyer-pw')
-            self.assertEqual(self.client.get('/api/admin/analytics').status_code, 403)
+            self.login(customer_id='C-1001', password='buyer-pw')
             explore = self.client.get('/api/catalog/search?q=milk').json()
             self.assertEqual(explore['kpis']['total'], 2)
             self.assertEqual(explore['groups'][0]['co2'], 2.0)
@@ -113,31 +117,8 @@ class PortalTests(unittest.TestCase):
             self.assertNotIn('Milk Alpha', str(explore))
             self.assertNotIn('secret-1', str(explore))
 
-            self.client.post('/api/session/logout')
-            self.login(role='valio', name='Anna', password='valio-pw')
-            analytics = self.client.get('/api/admin/analytics')
-            self.assertEqual(analytics.status_code, 200)
-            data = analytics.json()
-            self.assertEqual(data['summary']['products'], 2)
-            self.assertEqual(data['summary']['avg_co2'], 2.0)
-            self.assertEqual(data['summary']['reliability_products'], 1)
-            self.assertEqual({row['code'] for row in data['countries']}, {'fi', 'se'})
-            self.assertNotIn('Milk Alpha', str(data))
-            self.assertNotIn('secret-1', str(data))
-
-    def test_valio_staff_review_but_do_not_order(self):
-        self.assertEqual(self.login(role='valio', name='Anna', password='valio-pw').status_code, 200)
-        self.assertEqual(len(self.client.get('/api/customers').json()), 3)
-        self.assertEqual(len(self.client.get('/api/orders').json()), 2)
-        self.assertEqual(self.client.post('/api/requests', json={'text': 'milk'}).status_code, 403)
-        result = self.client.post('/api/orders/O-0002/decision', json={'decision': 'reject', 'comment': 'test'})
-        self.assertEqual(result.status_code, 200)
-        self.assertEqual(result.json()['reviewer'], 'Anna')
-        actors = [e.actor for e in gateway_app.S.audit.events()]
-        self.assertIn('human:Anna', actors)
-
     def test_sign_out_ends_the_session(self):
-        self.login(role='valio', name='Anna', password='valio-pw')
+        self.login(customer_id='C-1001', password='buyer-pw')
         self.client.post('/api/session/logout')
         self.assertEqual(self.client.get('/api/orders').status_code, 401)
 
@@ -147,13 +128,8 @@ class PortalTests(unittest.TestCase):
 
     def test_local_development_needs_no_password(self):
         self.use_passwords()
-        self.assertEqual(self.login(role='buyer', customer_id='C-1002').status_code, 200)
+        self.assertEqual(self.login(customer_id='C-1002').status_code, 200)
         self.assertEqual([c['id'] for c in self.client.get('/api/customers').json()], ['C-1002'])
-
-    def test_unset_valio_password_disables_admin_sign_in(self):
-        self.use_passwords(buyer='buyer-pw')
-        self.assertEqual(self.login(role='valio', name='Anna', password='').status_code, 401)
-        self.assertEqual(self.login(role='valio', name='Anna', password='buyer-pw').status_code, 401)
 
 
 if __name__ == '__main__':

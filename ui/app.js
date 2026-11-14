@@ -3,11 +3,16 @@ import { barList, hideTip, toneChip } from './charts.js';
 
 // ====================================================================== state & api
 const S = {
-  session: null, // { signed_in, role: 'buyer' | 'valio', name, customer_id, password_required, customers }
+  session: null, // { signed_in, role: 'buyer', name, customer_id, password_required, customers }
   vocab: { claims: {}, allergens: {}, labels: {}, sales_units: {}, requirement_options: [] },
   customers: [],
-  chat: { messages: [], understood: null }, // the conversation with the agent: { role: 'buyer' | 'agent', text }
+  // The conversation with the agent: { role: 'buyer' | 'agent', text }. Messages before `from` belong to an
+  // order that is done; `aside` marks the cancellation exchange. Neither is sent to the agent again.
+  chat: { messages: [], understood: null, from: 0 },
+  pendingCancel: null, // { order, reason }: the agent asked the buyer to confirm cancelling this order
   detailsOpen: false, // the buyer opened "what the agent understood / how it worked"
+  notice: null, // reminder to double-check, when the rule-based fallback understood the request
+  voice: null, // the running speech recognition, while the buyer is speaking
   offer: null,
   decision: null,
   edit: null,
@@ -28,7 +33,6 @@ const S = {
   submitError: null,
   reviewPending: new Set(),
   explore: { filters: new Set(), category: '' },
-  analyticsLoaded: false,
 };
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -71,18 +75,6 @@ function itemTitle(req) {
   return `${qty}${req.product_query}`;
 }
 
-const OUTCOMES = {
-  auto_approve: { tone: 'good', icon: '✓', title: 'Within authority', button: 'Place order' },
-  needs_approval: { tone: 'warning', icon: '⚑', title: 'Needs human approval', button: 'Send for approval' },
-  reject: { tone: 'critical', icon: '✕', title: 'Cannot be placed', button: 'Cannot be placed' },
-};
-
-function trustChip(status) {
-  if (status === 'trusted') return toneChip('good', '✓', 'Trusted · on whitelist');
-  if (status === 'unverified') return toneChip('warning', '!', 'New · needs verification');
-  return toneChip('critical', '✕', 'Blocked');
-}
-
 function checkItem(c) {
   const kind = c.passed ? 'pass' : c.severity;
   const icon = { pass: '✓', review: '!', block: '✕', info: 'i' }[kind];
@@ -93,14 +85,9 @@ function checkItem(c) {
 }
 
 // ====================================================================== status & navigation
-const PAGES = ['analytics', 'order', 'orders', 'review', 'customers', 'audit', 'explore'];
-// The buyer portal and the Valio Aimo admin see different pages; the server checks the same roles.
-const ROLE_PAGES = { buyer: ['order', 'orders', 'explore'], valio: ['analytics', 'review', 'customers', 'audit', 'explore'] };
-const loaders = {
-  analytics: () => S.analyticsLoaded || loadAnalytics(),
-  orders: loadMyOrders, review: loadReview, customers: loadCustomersPage, audit: () => loadAudit(),
-  explore: () => S.exploreLoaded || runExplore(),
-};
+const PAGES = ['order', 'orders', 'explore'];
+const ROLE_PAGES = { buyer: PAGES }; // the server checks the same role on every API call
+const loaders = { orders: loadMyOrders, explore: () => S.exploreLoaded || runExplore() };
 
 function route() {
   if (!S.session?.signed_in) return;
@@ -114,16 +101,6 @@ function route() {
   });
   hideTip();
   loaders[page]?.();
-}
-
-async function refreshReviewCount() {
-  if (S.session?.role !== 'valio') return;
-  try {
-    const pending = await api('/api/orders?status=pending_approval');
-    const badge = $('#nav-review-count');
-    badge.textContent = String(pending.length);
-    badge.hidden = pending.length === 0;
-  } catch { /* ignore */ }
 }
 
 // ====================================================================== order page
@@ -163,6 +140,7 @@ function updateOrderControls() {
   run.disabled = S.requestPending || S.submissionPending;
   run.classList.toggle('is-busy', S.requestPending);
   $('#request-text').disabled = S.submissionPending;
+  $('#voice-btn').disabled = S.requestPending || S.submissionPending;
   const rationale = $('#rationale');
   if (rationale) rationale.disabled = S.submissionPending;
   document.querySelectorAll('#examples button').forEach((b) => { b.disabled = S.requestPending || S.submissionPending; });
@@ -193,19 +171,6 @@ function currentCustomer() {
   return S.customers.find((c) => c.id === S.session?.customer_id);
 }
 
-function renderCustomer() {
-  $('#customer-name').textContent = currentCustomer()?.name || S.session?.name || '';
-  renderTrustCard();
-}
-
-function renderTrustCard() {
-  const c = currentCustomer();
-  if (!c) return;
-  $('#trust-card').replaceChildren(
-    h('div', { class: 'trust-head' }, trustChip(c.status), h('strong', { class: 'small', text: c.segment }), h('span', { class: 'muted small', text: c.notes })),
-    h('ul', { class: 'trust-reasons' }, c.trust.reasons.map((r) => h('li', { text: r }))));
-}
-
 function renderExamples() {
   const mine = EXAMPLES.filter((ex) => ex.customer === S.session.customer_id);
   const shown = [...mine, ...EXAMPLES.filter((ex) => ex.generic && !mine.includes(ex))].slice(0, 4);
@@ -232,10 +197,16 @@ function renderThread() {
   $('#chat-thread').replaceChildren(...msgs.map((m) => h('div', { class: `chat-msg chat-${m.role}` },
     h('span', { class: 'chat-who', text: m.role === 'buyer' ? (currentCustomer()?.name || 'You') : 'Ordering agent' }),
     h('p', { text: m.text }),
+    m.notice ? h('p', { class: 'chat-note', role: 'note', text: m.notice }) : null,
     m === last && waiting ? h('button', {
       type: 'button', class: 'link-button chat-skip', text: 'Show options with what you know so far',
       disabled: S.requestPending, onClick: () => sendMessage({ skip: true }),
-    }) : null)));
+    }) : null,
+    m === last && m.action === 'cancel' && S.pendingCancel ? h('div', { class: 'chat-actions' },
+      h('button', { type: 'button', class: 'btn btn-primary btn-small', text: 'Yes, cancel it', onClick: confirmCancel }),
+      h('button', { type: 'button', class: 'btn btn-small', text: 'No, keep it', onClick: keepOrder })) : null,
+    m.action === 'orders' ? h('a', { class: 'chat-action link-button', href: '#orders', text: 'See my orders' }) : null)));
+  $('#chat-thread').lastElementChild?.scrollIntoView({ block: 'nearest' }); // keep the newest message in view
   $('#request-label').textContent = waiting ? 'Your answer' : msgs.length ? 'Anything to change or add?' : 'Your request';
   $('#request-text').placeholder = waiting ? 'e.g. 200 litres, delivered on Friday' : 'e.g. I need 1,000 litres of lactose-free milk by Monday';
   $('#run-btn').textContent = msgs.length ? 'Send' : 'Find the best option';
@@ -243,14 +214,25 @@ function renderThread() {
 
 function offerSummary(offer) {
   const p = offer.parsed;
-  const items = p.items.map((it) => itemTitle(it)).join('; ') || 'no products recognised';
-  return `Got it: ${items}, delivery ${fmt.day(p.delivery_date)}. I checked prices and availability with Valio Aimo: the options are below.`;
+  const wants = p.items.map((it) => itemTitle(it)).join('; ') || 'no products recognised';
+  const picks = offer.items.map((item) => item.candidates.find((c) => c.product_id === item.recommended_product_id))
+    .filter(Boolean).map((c) => `${c.name} × ${fmt.num(c.quantity, 2)} ${unitLabel(c.sales_unit, c.quantity)} = ${fmt.eur(c.line_total)}`);
+  return `Got it: ${wants}, delivery ${fmt.day(p.delivery_date)}. `
+    + (picks.length ? `I checked prices and stock with Valio Aimo. I recommend ${picks.join('; ')}. Choose an option below and place the order.`
+      : 'I found no option that can be ordered right now: see the options below, or tell me what to change.');
 }
 
+function say(text, extra = {}) {
+  S.chat.messages.push({ role: 'agent', text, ...extra });
+  renderThread();
+}
+
+// The options and the decision appear below the conversation; the buyer picks one and places the order.
 function showOffer(res, { scroll = true } = {}) {
   Object.assign(S, { offer: res.offer, decision: res.decision, selections: {}, sort: {}, expanded: {}, rationale: null, submitted: null, dirty: false, requestChanged: false });
   S.edit = structuredClone(res.offer.parsed);
   S.chat.understood = res.offer.parsed;
+  S.notice = res.notice || null; // set when the rule-based fallback understood the request
   const idx = S.customers.findIndex((c) => c.id === res.customer.id);
   if (idx >= 0) S.customers[idx] = res.customer;
   setStatus('');
@@ -280,31 +262,59 @@ function endPending(version) {
   updateOrderControls();
 }
 
+const CONFIRM_YES = /^\s*(?:yes|yep|yeah|ok(?:ay)?|sure|please do|do it|confirm\w*|kyllä|joo|ja)\b/i;
+const CONFIRM_NO = /^\s*(?:no|nope|don'?t|keep|ei|nej)\b/i;
+
+function conversationForAgent() {
+  return S.chat.messages.slice(S.chat.from).filter((m) => !m.aside).map(({ role, text }) => ({ role, text }));
+}
+
 async function sendMessage({ skip = false } = {}) {
   if (S.requestPending || S.submissionPending) return;
+  cancelVoice(); // sending while still listening keeps what was heard so far
   const text = $('#request-text').value.trim();
+  if (!skip && text && S.pendingCancel && (CONFIRM_YES.test(text) || CONFIRM_NO.test(text))) {
+    S.chat.messages.push({ role: 'buyer', text, aside: true }); // a typed answer to "cancel order …?"
+    $('#request-text').value = '';
+    if (CONFIRM_YES.test(text)) await confirmCancel(); else keepOrder();
+    return;
+  }
+  if (!skip && !text) { setStatus('Write what you need first.', true); $('#request-text').focus(); return; }
+  S.pendingCancel = null; // anything else the buyer says leaves the cancellation unanswered
+  if (!skip && S.submitted && S.chat.from < S.chat.messages.length) {
+    S.chat.from = S.chat.messages.length; // that order is done: this message starts a new one
+    S.chat.understood = null;
+  }
   if (!skip) {
-    if (!text) { setStatus('Write what you need first.', true); $('#request-text').focus(); return; }
     S.chat.messages.push({ role: 'buyer', text });
     $('#request-text').value = '';
   }
+  const wasDirty = S.dirty;
   const version = ++S.requestVersion;
   startPending(skip ? 'Checking prices and availability with what the agent knows so far…' : 'The agent is reading your message…');
   renderThread();
   try {
     const res = await api('/api/chat', {
       method: 'POST',
-      body: { messages: S.chat.messages.map(({ role, text: t }) => ({ role, text: t })), understood: S.chat.understood, skip_questions: skip },
+      body: { messages: conversationForAgent(), understood: S.chat.understood, skip_questions: skip },
     });
     if (version !== S.requestVersion) return;
+    if (res.kind === 'cancel' || res.kind === 'answer') { // about an order already placed, not the current request
+      S.chat.messages[S.chat.messages.length - 1].aside = true;
+      S.dirty = wasDirty;
+      if (res.kind === 'cancel') S.pendingCancel = { order: res.order, reason: text };
+      S.chat.messages.push({ role: 'agent', text: res.kind === 'cancel' ? res.question : res.text, aside: true, action: res.kind === 'cancel' ? 'cancel' : null });
+      setStatus('');
+      return;
+    }
     if (res.kind === 'question') {
       S.chat.understood = res.understood;
-      S.chat.messages.push({ role: 'agent', text: res.question, question: true });
+      S.chat.messages.push({ role: 'agent', text: res.question, question: true, notice: res.notice });
       setStatus('');
       return;
     }
     showOffer(res);
-    S.chat.messages.push({ role: 'agent', text: offerSummary(res.offer) });
+    S.chat.messages.push({ role: 'agent', text: offerSummary(res.offer), notice: res.notice });
   } catch (e) {
     if (version !== S.requestVersion) return;
     setStatus(e.message, true);
@@ -315,10 +325,83 @@ async function sendMessage({ skip = false } = {}) {
   }
 }
 
+// ---------------------------------------------------------------------- voice input
+// The browser's own speech recognition (Chrome, Edge, Safari). The words land in the text box, so the
+// buyer can check and edit them before sending; nothing is sent automatically.
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const VOICE_ERRORS = {
+  'not-allowed': 'Microphone access is blocked: allow it in the browser to speak your request.',
+  'service-not-allowed': 'Microphone access is blocked: allow it in the browser to speak your request.',
+  'no-speech': 'No speech was heard. Try again, a little closer to the microphone.',
+  'audio-capture': 'No microphone was found.',
+  network: 'Voice input needs an internet connection.',
+};
+
+function initVoice() {
+  if (!SpeechRecognition) return; // e.g. Firefox: typing only
+  const lang = $('#voice-lang');
+  const saved = storage.get('aimo.voiceLang', '');
+  const browser = (navigator.language || '').slice(0, 2);
+  lang.value = saved || { fi: 'fi-FI', sv: 'sv-SE' }[browser] || 'en-GB';
+  lang.addEventListener('change', () => storage.set('aimo.voiceLang', lang.value));
+  $('#voice-controls').hidden = false;
+  $('#voice-btn').addEventListener('click', () => (S.voice ? S.voice.stop() : startVoice()));
+}
+
+function startVoice() {
+  const box = $('#request-text');
+  const before = box.value.trim();
+  const rec = new SpeechRecognition();
+  rec.lang = $('#voice-lang').value;
+  rec.interimResults = true;
+  rec.continuous = true; // keep listening through short pauses; the buyer clicks again to stop
+  let heard = '';
+  rec.onresult = (e) => {
+    let interim = '';
+    heard = '';
+    for (const r of e.results) {
+      if (r.isFinal) heard += r[0].transcript;
+      else interim += r[0].transcript;
+    }
+    box.value = [before, (heard + interim).trim()].filter(Boolean).join(' ');
+  };
+  rec.onerror = (e) => { if (e.error !== 'aborted') setStatus(VOICE_ERRORS[e.error] || `Voice input stopped (${e.error}).`, true); };
+  rec.onend = () => {
+    S.voice = null;
+    box.value = [before, heard.trim()].filter(Boolean).join(' ');
+    if (box.value.trim() !== before) markDirty(true);
+    renderVoice();
+    box.focus();
+  };
+  S.voice = rec;
+  setStatus('');
+  rec.start();
+  renderVoice();
+}
+
+// Stop listening without touching the text box again (it already holds what was heard so far).
+function cancelVoice() {
+  if (!S.voice) return;
+  S.voice.onend = null;
+  S.voice.onresult = null;
+  S.voice.abort();
+  S.voice = null;
+  renderVoice();
+}
+
+function renderVoice() {
+  if (!SpeechRecognition) return;
+  const listening = Boolean(S.voice);
+  $('#voice-btn').classList.toggle('is-listening', listening);
+  $('#voice-btn').setAttribute('aria-pressed', String(listening));
+  $('#voice-label').textContent = listening ? 'Listening… click to stop' : 'Speak';
+  $('#voice-lang').disabled = listening;
+}
+
 // Re-run with the person's corrections from "What the agent understood" (no new message).
 async function runRequest(override) {
   if (S.requestPending || S.submissionPending || !S.offer) return;
-  const text = S.chat.messages.filter((m) => m.role === 'buyer').map((m) => m.text).join(' · ') || S.offer.request_text;
+  const text = conversationForAgent().filter((m) => m.role === 'buyer').map((m) => m.text).join(' · ') || S.offer.request_text;
   const version = ++S.requestVersion;
   const editVersion = S.editVersion;
   startPending('Re-checking with your corrections…');
@@ -330,6 +413,7 @@ async function runRequest(override) {
       return;
     }
     showOffer(res, { scroll: false });
+    say(offerSummary(res.offer), { notice: res.notice });
   } catch (e) {
     if (version === S.requestVersion) setStatus(e.message, true);
   } finally {
@@ -343,6 +427,10 @@ const selectedCand = (i) => S.offer.items[i].candidates.find((c) => c.product_id
 function renderResults() {
   const host = $('#results');
   host.hidden = false;
+  if (S.submitted) { // once ordered, only the order itself, in one row under the conversation
+    host.replaceChildren(orderStrip());
+    return;
+  }
   host.replaceChildren(h('div', { class: 'results-grid' },
     h('div', { class: 'results-main' }, agentDetails(), S.offer.items.map((item, i) => itemPanel(item, i))),
     h('aside', { class: 'results-side', 'aria-label': 'Decision' }, decisionPanel())));
@@ -350,13 +438,17 @@ function renderResults() {
 
 // ---------------------------------------------------------------------- agent details (collapsed)
 // What the agent understood and the steps it ran are kept out of the buyer's way. They open by
-// themselves when the request still needs a correction (e.g. the buyer skipped the agent's question).
+// themselves when the request still needs a correction, or when the AI assistant was unavailable.
 function agentDetails() {
   const p = S.offer.parsed;
-  const needsFix = p.delivery_date_assumed || p.clarification_required
+  const fallback = p.parser === 'rules';
+  const needsFix = fallback || p.delivery_date_assumed || p.clarification_required
     || p.items.some((it) => it.quantity == null || !it.unit || it.assumption);
+  const summary = fallback ? 'Double-check what was understood: the AI assistant was unavailable'
+    : needsFix ? 'Check what the agent understood: something is still missing'
+      : 'Details: what the agent understood and how it worked';
   const details = h('details', { class: 'agent-details', id: 'agent-details', open: needsFix || S.detailsOpen },
-    h('summary', { text: needsFix ? 'Check what the agent understood: something is still missing' : 'Details: what the agent understood and how it worked' }),
+    h('summary', { text: summary }),
     understoodPanel(), operationsPanel());
   details.addEventListener('toggle', () => { if (!needsFix) S.detailsOpen = details.open; });
   return details;
@@ -577,7 +669,7 @@ function itemPanel(item, i) {
     selected: c.product_id === sel,
   }));
   const rec = item.candidates.find((c) => c.product_id === item.recommended_product_id);
-  const SHOW = 8;
+  const SHOW = 4; // the rest are behind "Show all N options"
   let visible = rows;
   if (!S.expanded[i] && rows.length > SHOW) {
     visible = rows.slice(0, SHOW);
@@ -647,7 +739,9 @@ async function selectCandidate(i, pid) {
   }
 }
 
-// ---------------------------------------------------------------------- decision
+// ---------------------------------------------------------------------- decision and placing the order
+// The buyer chooses an option and places the order. Within the agent's authority it goes through; outside
+// it, a person in the customer's organisation approves by typing their full name. Hard rules are never waived.
 function orderLines() {
   return S.offer.items.map((item, i) => ({ item, i, c: selectedCand(i) })).filter((l) => l.c && l.c.line_total != null);
 }
@@ -678,6 +772,17 @@ function checkGroup(title, checks, collapsed = false) {
   return h('div', { class: 'check-group' }, h('div', { class: 'label', text: title }), list);
 }
 
+function reviewReasons(d) {
+  return (d?.checks || []).filter((c) => !c.passed && c.severity === 'review');
+}
+
+const OUTCOMES = {
+  auto_approve: { tone: 'good', icon: '✓', title: 'Within the agent’s authority', button: 'Place order' },
+  needs_approval: { tone: 'warning', icon: '⚑', title: 'Needs a person’s approval', button: 'Approve and place order…' },
+  reject: { tone: 'critical', icon: '✕', title: 'Cannot be placed', button: 'Cannot be placed' },
+};
+const SIMULATED = '(Simulated: the mock backend has no order endpoint.)';
+
 function decisionPanel() {
   const d = S.decision;
   const o = S.offer;
@@ -697,7 +802,7 @@ function decisionPanel() {
     checkGroup('Needs attention', failing),
     checkGroup('Notes', notes),
     checkGroup(`Passed checks (${passed.length})`, passed, true),
-    S.submitted ? submittedBlock() : submitBlock(lines, out, d),
+    submitBlock(lines, out, d),
     h('p', { class: 'fine' }, `Offer ${o.id} · fixed prices until ${fmt.time(o.valid_until)} · `,
       h('span', { title: `SHA-256 ${o.content_hash}\nEd25519 ${o.signature}`, text: `signed ✓ ${o.content_hash.slice(0, 12)}…` })));
 }
@@ -707,84 +812,200 @@ function currentCustomerName(id) {
 }
 
 function submitBlock(lines, out, d) {
-  const area = h('textarea', { id: 'rationale', rows: '4', 'aria-describedby': 'rationale-hint' });
+  const area = h('textarea', { id: 'rationale', rows: '3', 'aria-describedby': 'rationale-hint' });
   area.value = S.rationale ?? defaultRationale();
   area.addEventListener('input', () => { S.rationale = area.value; });
   const stateMessage = orderStateMessage();
   const blocked = !d || d.outcome === 'reject' || lines.length === 0 || Boolean(stateMessage);
   return h('div', { class: 'submit-block' },
+    S.notice ? h('p', { class: 'offer-state', role: 'note', text: S.notice }) : null,
     stateMessage ? h('p', { class: 'offer-state', role: 'status', text: stateMessage }) : null,
     S.evaluationError ? h('p', { class: 'bad small', role: 'alert', text: S.evaluationError }) : null,
     S.submitError ? h('p', { class: 'bad small', role: 'alert', text: S.submitError }) : null,
-    h('label', { for: 'rationale', text: 'Rationale (saved to the audit trail)' }),
-    area,
-    h('span', { id: 'rationale-hint', class: 'hint muted', text: 'Written by the agent from the data above. Edit it if you chose differently.' }),
+    h('details', { class: 'rationale-details' },
+      h('summary', { text: 'Rationale (saved to the audit trail)' }),
+      area,
+      h('span', { id: 'rationale-hint', class: 'hint muted', text: 'Written by the agent from the data above. Edit it if you chose differently.' })),
     h('button', {
       class: 'btn btn-primary', type: 'button', id: 'submit-order', disabled: blocked,
-      text: S.submissionPending ? 'Submitting…' : lines.length === 0 ? 'Add the missing details first' : out.button,
-      onClick: () => submitOrder(area.value),
+      text: S.submissionPending ? 'Placing…' : lines.length === 0 ? 'Add the missing details first' : out.button,
+      onClick: () => (d?.outcome === 'needs_approval' ? openApproval() : submitOrder()),
     }));
 }
 
-function submittedBlock() {
+// The placed (or cancelled) order in one horizontal row; the options and details are no longer shown.
+function orderStrip() {
   const o = S.submitted;
-  const map = {
-    placed: ['good', '✓', `Order ${o.id} placed`, 'This order was within the customer’s authority, so the agent placed it without a person. (Simulated: the mock backend has no order endpoint.)'],
-    pending_approval: ['warning', '⚑', `Order ${o.id} is waiting for approval`, 'Valio Aimo staff will see it in their review queue, together with the reasons and the agent’s rationale. Follow it under My orders.'],
-    rejected: ['critical', '✕', `Order ${o.id} was not placed`, o.decision.summary],
-  };
-  const [tone, icon, title, text] = map[o.status];
-  return h('div', { class: `result-box tone-${tone}`, role: 'status' },
-    h('strong', {}, h('span', { 'aria-hidden': 'true', text: `${icon} ` }), title),
-    h('p', { text }),
-    h('div', { class: 'result-actions' },
-      h('a', { class: `btn btn-small${o.status === 'pending_approval' ? ' btn-primary' : ''}`, href: '#orders', text: 'See my orders' }),
-      h('button', { class: 'btn btn-small', type: 'button', text: 'New request', onClick: newRequest })));
+  const status = {
+    placed: ['good', '✓', 'Placed'],
+    cancelled: ['neutral', '–', 'Cancelled'],
+    rejected: ['critical', '✕', 'Not placed'],
+  }[o.status] || ['critical', '✕', 'Not placed'];
+  const decided = o.status === 'cancelled' ? (o.cancel_reason ? `Cancelled: “${o.cancel_reason}”` : 'Cancelled')
+    : o.status === 'placed' ? (o.reviewer ? `Approved by ${o.reviewer}` : 'Within the agent’s authority')
+      : o.decision.summary.replace(/^Blocked: /, '');
+  const delivery = o.lines.length ? o.lines.map((l) => l.delivery_date).sort()[0] : null;
+  const cancellable = o.status === 'placed' && o.cancellable_until && new Date(o.cancellable_until) > new Date();
+  const cell = (label, ...content) => h('div', { class: 'strip-cell' }, h('span', { class: 'stat-label', text: label }), ...content);
+  return h('section', { class: 'panel order-strip', id: 'decision', 'aria-label': `Order ${o.id}` },
+    cell(`Order ${o.id}`, toneChip(...status)),
+    h('div', { class: 'strip-cell strip-lines' }, h('span', { class: 'stat-label', text: 'Ordered' }),
+      o.lines.length ? o.lines.map((l) => h('span', { class: 'cell-line', text: `${fmt.num(l.quantity, 2)} ${unitLabel(l.sales_unit, l.quantity)} · ${l.name}` }))
+        : h('span', { text: o.request_text || '–' })),
+    cell('Delivery', h('strong', { text: delivery ? fmt.day(delivery) : '–' })),
+    cell('Total, excl. VAT', h('strong', { class: 'strip-total', text: fmt.eur(o.total) })),
+    cell('Decided', h('span', { text: decided }),
+      cancellable ? h('span', { class: 'muted small', text: `Can be cancelled until ${fmt.dateTime(o.cancellable_until)}` }) : null),
+    h('div', { class: 'strip-actions' },
+      h('a', { class: 'btn btn-small', href: '#orders', text: 'See my orders' }),
+      cancellable ? h('button', { class: 'btn btn-small', type: 'button', text: 'Cancel order', onClick: () => cancelOrder(o, () => renderResults()) }) : null,
+      h('button', { class: 'btn btn-small', type: 'button', text: 'New request', onClick: () => newRequest() })));
+}
+
+// Bring the conversation (and the order row under it) back into view.
+function backToConversation() {
+  $('#results').scrollIntoView({ behavior: 'smooth', block: 'end' });
+  $('#request-text').focus({ preventScroll: true });
 }
 
 function rerenderDecision() {
   const old = $('#decision');
-  if (old) old.replaceWith(decisionPanel());
+  if (old) old.replaceWith(S.submitted ? orderStrip() : decisionPanel());
 }
 
-async function submitOrder(rationale) {
+// Place the selected options. `approver` is the full name typed in the approval dialog, when needed.
+async function submitOrder(approver = '') {
   const blocked = orderStateMessage();
-  if (!S.offer || S.submitted || !S.decision || blocked || S.decision.outcome === 'reject' || !orderLines().length) {
+  if (!S.offer || S.submitted || S.submissionPending || !S.decision || blocked || S.decision.outcome === 'reject' || !orderLines().length) {
     if (blocked) { setStatus(blocked, true); if (S.offer) rerenderDecision(); updateOrderControls(); }
-    return;
+    return false;
   }
-  const offerId = S.offer.id;
-  const selections = { ...S.selections };
   S.submissionPending = true;
   S.submitError = null;
   rerenderDecision();
   updateOrderControls();
   try {
-    S.submitted = await api('/api/orders', { method: 'POST', body: { offer_id: offerId, selections, rationale } });
+    S.submitted = await api('/api/orders', {
+      method: 'POST',
+      body: { offer_id: S.offer.id, selections: { ...S.selections }, rationale: S.rationale ?? defaultRationale(), approved_by: approver },
+    });
+    const o = S.submitted;
+    if (o.status === 'placed') {
+      say(`Order ${o.id} is placed (${fmt.eur(o.total)})${o.reviewer ? `, approved by ${o.reviewer}` : ''}. Need anything else? Just write it below.`,
+        { action: 'orders' });
+    }
+    return true;
   } catch (e) {
     S.submitError = e.message;
-    setStatus(e.message, true);
+    if (!approver) setStatus(e.message, true); // the approval dialog shows its own errors
+    return false;
   } finally {
     S.submissionPending = false;
-    rerenderDecision();
+    if (S.submitted) {
+      renderResults(); // the order row replaces the options and the decision panel
+      backToConversation();
+    } else {
+      rerenderDecision();
+    }
     updateOrderControls();
   }
-  if (S.submitted) {
-    try { S.customers = await api('/api/customers'); renderTrustCard(); } catch { /* Order confirmation is already authoritative. */ }
+}
+
+async function confirmCancel() {
+  const pending = S.pendingCancel;
+  if (!pending) return;
+  S.pendingCancel = null;
+  renderThread();
+  try {
+    const updated = await api(`/api/orders/${pending.order.id}/cancel`, { method: 'POST', body: { reason: pending.reason } });
+    if (S.submitted?.id === updated.id) { S.submitted = updated; rerenderDecision(); }
+    say(`Done: order ${updated.id} is cancelled.`, { aside: true, action: 'orders' });
+  } catch (e) {
+    say(`I couldn’t cancel it: ${e.message}`, { aside: true });
   }
+}
+
+function keepOrder() {
+  const pending = S.pendingCancel;
+  S.pendingCancel = null;
+  if (pending) say(`OK, order ${pending.order.id} stays as it is.`, { aside: true });
+}
+
+// Cancel a placed order (until the order cut-off of its delivery). `done` re-renders whatever showed it.
+async function cancelOrder(order, done) {
+  const reason = prompt(`Cancel order ${order.id} (${fmt.eur(order.total)})? You can give a reason (optional).`, '');
+  if (reason === null) return; // the buyer clicked Cancel in the prompt
+  try {
+    const updated = await api(`/api/orders/${order.id}/cancel`, { method: 'POST', body: { reason: reason.trim() } });
+    if (S.submitted?.id === updated.id) {
+      S.submitted = updated;
+      say(`Order ${updated.id} is cancelled.`, { aside: true });
+    }
+    done?.(updated);
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+// ---------------------------------------------------------------------- approval by a named person
+function openApproval() {
+  const d = S.decision;
+  if (!d || !S.offer || S.submitted || S.dirty || S.requestPending || S.submissionPending) return;
+  $('#approve-summary').replaceChildren(
+    h('div', { class: 'approve-total' }, h('span', { class: 'stat-label', text: 'Order total, excl. VAT' }), h('strong', { text: fmt.eur(d.total) })),
+    h('ul', { class: 'approve-lines' }, orderLines().map(({ c }) => h('li', {},
+      h('span', { text: `${fmt.num(c.quantity, 2)} ${unitLabel(c.sales_unit, c.quantity)} · ${c.name}` }), h('strong', { text: fmt.eur(c.line_total) })))),
+    h('p', { class: 'label', text: 'Why it needs a person' }),
+    h('ul', { class: 'checks' }, reviewReasons(d).map(checkItem)));
+  $('#approve-form .signin-error').hidden = true;
+  $('#approve-name').value = '';
+  $('#approve-submit').disabled = false;
+  if (!$('#approve-dialog').open) $('#approve-dialog').showModal();
+  $('#approve-name').focus();
+}
+
+function declineApproval() {
+  if ($('#approve-dialog').open) $('#approve-dialog').close();
+}
+
+function initApproval() {
+  const dialog = $('#approve-dialog');
+  $('#approve-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = $('#approve-name').value.trim().replace(/\s+/g, ' ');
+    const error = $('#approve-form .signin-error');
+    if (!/^\S+ \S+/.test(name)) {
+      error.textContent = 'Type your first and last name to approve.';
+      error.hidden = false;
+      $('#approve-name').focus();
+      return;
+    }
+    error.hidden = true;
+    $('#approve-submit').disabled = true;
+    const ok = await submitOrder(name);
+    $('#approve-submit').disabled = false;
+    if (ok) dialog.close();
+    else { error.textContent = S.submitError || 'The order could not be placed.'; error.hidden = false; }
+  });
+  $('#approve-cancel').addEventListener('click', declineApproval);
+  $('#approve-close').addEventListener('click', declineApproval);
+  dialog.addEventListener('cancel', (e) => { e.preventDefault(); declineApproval(); }); // the Esc key
 }
 
 function newRequest({ focus = true } = {}) {
   if (S.submissionPending) return;
+  cancelVoice();
+  if ($('#approve-dialog').open) $('#approve-dialog').close();
   S.requestVersion += 1;
   S.evaluationVersion += 1;
   Object.assign(S, { offer: null, decision: null, edit: null, submitted: null, selections: {}, sort: {}, rationale: null, dirty: false, requestChanged: false, requestPending: false, evaluationPending: false, evaluationError: null, submitError: null });
-  S.chat = { messages: [], understood: null };
+  S.chat = { messages: [], understood: null, from: 0 };
+  S.pendingCancel = null;
+  S.notice = null;
   $('#results').hidden = true;
   $('#results').classList.remove('is-refreshing');
   $('#results').replaceChildren();
   $('#request-text').value = '';
-  renderCustomer();
   renderThread();
   setStatus('');
   updateOrderControls();
@@ -792,110 +1013,19 @@ function newRequest({ focus = true } = {}) {
   if (focus) $('#request-text').focus();
 }
 
-// ====================================================================== review page
-function linesTable(lines) {
-  return h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, h('th', { text: 'Product' }), h('th', { class: 'num', text: 'Quantity' }),
-      h('th', { class: 'num', text: 'Unit price' }), h('th', { class: 'num', text: 'Line total' }), h('th', { text: 'Delivery' }))),
-    h('tbody', {}, lines.map((l) => h('tr', {},
-      h('td', {}, l.name, h('span', { class: 'cell-sub', text: `${l.product_id}${l.is_recommended ? '' : ' · chosen instead of the recommendation'}` })),
-      h('td', { class: 'num', text: `${fmt.num(l.quantity, 2)} ${unitLabel(l.sales_unit, l.quantity)}` }),
-      h('td', { class: 'num', text: fmt.eur(l.unit_price) }),
-      h('td', { class: 'num', text: fmt.eur(l.line_total) }),
-      h('td', { text: fmt.day(l.delivery_date) }))))));
-}
-
-async function loadReview() {
-  try {
-    const [pending, all] = await Promise.all([api('/api/orders?status=pending_approval'), api('/api/orders')]);
-    $('#review-list').replaceChildren(...(pending.length ? pending.map(reviewCard)
-      : [h('p', { class: 'empty', text: 'Nothing to review right now. Orders the agent may not place on its own appear here.' })]));
-    const done = all.filter((o) => o.status !== 'pending_approval').slice(0, 15);
-    $('#review-done').replaceChildren(done.length ? h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['Order', 'Customer', 'Status', 'Decided by', 'Total'].map((t, k) => h('th', { class: k === 4 ? 'num' : null, text: t })))),
-      h('tbody', {}, done.map((o) => h('tr', {},
-        h('td', {}, o.id, h('span', { class: 'cell-sub', text: fmt.dateTime(o.created_at) })),
-        h('td', { text: o.customer_name }),
-        h('td', {}, o.status === 'placed' ? toneChip('good', '✓', 'Placed') : toneChip('critical', '✕', 'Rejected')),
-        h('td', { text: o.reviewer ? `${o.reviewer}${o.review_comment ? `: “${o.review_comment}”` : ''}` : 'Agent (within authority)' }),
-        h('td', { class: 'num', text: fmt.eur(o.total) }))))))
-      : h('p', { class: 'muted', text: 'No decided orders yet.' }));
-  } catch (e) {
-    $('#review-list').replaceChildren(h('p', { class: 'empty', text: e.message }));
-  }
-  refreshReviewCount();
-}
-
-function reviewCard(o) {
-  const c = S.customers.find((x) => x.id === o.customer_id);
-  const reasons = o.decision.checks.filter((ch) => !ch.passed && ch.severity !== 'info');
-  const notes = o.decision.checks.filter((ch) => !ch.passed && ch.severity === 'info');
-  const expired = o.offer_valid_until && new Date(o.offer_valid_until) < new Date();
-  const verify = c?.status === 'unverified' && c.business_id_valid
-    ? h('input', { type: 'checkbox', id: `verify-${o.id}` }) : null;
-  const comment = h('input', { type: 'text', placeholder: 'Comment (optional, saved to the audit trail)', 'aria-label': `Comment on ${o.id}`, maxlength: '500' });
-  const pending = S.reviewPending.has(o.id);
-  const hardBlocked = reasons.some((ch) => ch.severity === 'block');
-  return h('article', { class: 'panel review-card', 'data-order-id': o.id },
-    h('div', { class: 'review-head' },
-      h('div', {}, h('h3', { text: `${o.id} · ${o.customer_name}` }), h('div', { class: 'muted small', text: `Created ${fmt.dateTime(o.created_at)} · offer ${o.offer_id}` })),
-      h('div', { class: 'review-total' }, h('div', { class: 'stat-label', text: 'Total excl. VAT' }), h('div', { class: 'stat-value', text: fmt.eur(o.total) }))),
-    h('div', { class: 'review-chips' },
-      c ? trustChip(c.status) : null,
-      expired ? toneChip('warning', '!', 'Offer expired: prices may have changed') : toneChip('good', '✓', `Prices fixed until ${fmt.time(o.offer_valid_until)}`)),
-    h('h4', { text: 'Why it needs a person' }),
-    h('ul', { class: 'checks' }, reasons.map(checkItem), notes.map(checkItem)),
-    linesTable(o.lines),
-    o.request_text ? h('blockquote', { class: 'quote' }, h('span', { class: 'muted small', text: 'Request: ' }), o.request_text) : null,
-    o.rationale ? h('div', { class: 'rationale' }, h('span', { class: 'muted small', text: 'Agent rationale' }), h('p', { text: o.rationale })) : null,
-    h('div', { class: 'review-actions' },
-      verify ? h('label', { class: 'check-inline', for: `verify-${o.id}` }, verify, `Also verify ${c.name} and add it to the whitelist`) : null,
-      comment,
-      h('button', { class: 'btn btn-primary btn-small', type: 'button', text: 'Approve', disabled: pending || expired || hardBlocked, onClick: () => decide(o, 'approve', comment.value, verify?.checked) }),
-      h('button', { class: 'btn btn-small', type: 'button', text: 'Reject', disabled: pending, onClick: () => decide(o, 'reject', comment.value, false) })),
-    expired ? h('p', { class: 'offer-state', text: 'This offer expired. Reject it and request a fresh offer before approving.' }) : null,
-    h('p', { class: 'review-error bad small', role: 'alert', hidden: true }));
-}
-
-async function decide(order, decision, comment, verifyCustomer) {
-  if (S.reviewPending.has(order.id)) return;
-  if (decision === 'approve' && ((order.offer_valid_until && new Date(order.offer_valid_until) <= new Date()) || order.decision.checks.some((ch) => !ch.passed && ch.severity === 'block'))) {
-    await loadReview();
-    return;
-  }
-  S.reviewPending.add(order.id);
-  const card = document.querySelector(`.review-card[data-order-id="${CSS.escape(order.id)}"]`);
-  const controls = [...(card?.querySelectorAll('button, input') || [])];
-  const disabledBefore = controls.map((el) => el.disabled);
-  controls.forEach((el) => { el.disabled = true; });
-  card?.setAttribute('aria-busy', 'true');
-  const error = card?.querySelector('.review-error');
-  if (error) error.hidden = true;
-  try {
-    await api(`/api/orders/${order.id}/decision`, { method: 'POST', body: { decision, comment, verify_customer: Boolean(verifyCustomer) } });
-    try { S.customers = await api('/api/customers'); } catch { /* Decision was saved; still refresh the queue. */ }
-    await loadReview();
-  } catch (e) {
-    if (error) { error.textContent = e.message; error.hidden = false; }
-    else alert(e.message);
-  } finally {
-    S.reviewPending.delete(order.id);
-    controls.forEach((el, i) => { el.disabled = disabledBefore[i]; });
-    card?.removeAttribute('aria-busy');
-  }
-}
-
 // ====================================================================== my orders (buyer portal)
 function orderStatusChip(status) {
   if (status === 'placed') return toneChip('good', '✓', 'Placed');
-  if (status === 'pending_approval') return toneChip('warning', '⚑', 'Waiting for Valio Aimo');
+  if (status === 'pending_approval') return toneChip('warning', '⚑', 'Waiting for approval');
+  if (status === 'cancelled') return toneChip('neutral', '–', 'Cancelled');
   return toneChip('critical', '✕', 'Not placed');
 }
 
 function decidedBy(o) {
-  if (o.reviewer) return `${o.reviewer} at Valio Aimo${o.review_comment ? `: “${o.review_comment}”` : ''}`;
-  if (o.status === 'pending_approval') return 'In the Valio Aimo review queue';
-  if (o.status === 'placed') return 'Placed automatically (within your limit)';
+  if (o.status === 'cancelled') return `Cancelled ${fmt.dateTime(o.cancelled_at)}${o.cancel_reason ? `: “${o.cancel_reason}”` : ''}`;
+  if (o.reviewer) return `Approved by ${o.reviewer}`;
+  if (o.status === 'pending_approval') return 'Waiting for approval';
+  if (o.status === 'placed') return 'Within the agent’s authority';
   return o.decision.summary;
 }
 
@@ -908,7 +1038,7 @@ async function loadMyOrders() {
     return;
   }
   host.replaceChildren(h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, ['Order', 'Status', 'What', 'Decided by', 'Total'].map((t, k) => h('th', { class: k === 4 ? 'num' : null, text: t })))),
+    h('thead', {}, h('tr', {}, ['Order', 'Status', 'What', 'Decided by', 'Total', ''].map((t, k) => h('th', { class: k === 4 ? 'num' : null, text: t })))),
     h('tbody', {}, orders.map((o) => h('tr', {},
       h('td', {}, o.id, h('span', { class: 'cell-sub', text: fmt.dateTime(o.created_at) })),
       h('td', {}, orderStatusChip(o.status)),
@@ -916,202 +1046,11 @@ async function loadMyOrders() {
         ? o.lines.map((l) => h('span', { class: 'cell-line', text: `${fmt.num(l.quantity, 2)} ${unitLabel(l.sales_unit, l.quantity)} · ${l.name}` }))
         : o.request_text || '–'),
       h('td', { text: decidedBy(o) }),
-      h('td', { class: 'num', text: fmt.eur(o.total) })))))));
-}
-
-// ====================================================================== customers page
-function validYTunnus(v) {
-  const m = /^(\d{7})-(\d)$/.exec(v.trim());
-  if (!m) return false;
-  const w = [7, 9, 10, 5, 8, 4, 2];
-  const r = [...m[1]].reduce((s, d, k) => s + Number(d) * w[k], 0) % 11;
-  if (r === 1) return false;
-  return Number(m[2]) === (r === 0 ? 0 : 11 - r);
-}
-
-async function loadCustomersPage() {
-  try { S.customers = await api('/api/customers'); } catch (e) { $('#customer-table').replaceChildren(h('p', { class: 'empty', text: e.message })); return; }
-  $('#customer-table').replaceChildren(h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, ['Customer', 'Business ID', 'Trust', 'Orders', 'Avg order', 'Auto-approve up to', 'Hard rules', ''].map((t, k) =>
-      h('th', { class: [3, 4, 5].includes(k) ? 'num' : null, text: t })))),
-    h('tbody', {}, S.customers.map((c) => h('tr', {},
-      h('td', {}, h('strong', { text: c.name }), h('span', { class: 'cell-sub', text: `${c.id} · ${c.segment}` })),
-      h('td', {}, c.business_id || '–', h('span', { class: 'cell-sub', text: c.business_id_valid ? '✓ checksum OK' : '✕ checksum fails' })),
-      h('td', {}, trustChip(c.status)),
-      h('td', { class: 'num', text: fmt.num(c.past_orders) }),
-      h('td', { class: 'num', text: c.avg_order_value != null ? fmt.eur0(c.avg_order_value) : '–' }),
-      h('td', { class: 'num', text: c.auto_approve_limit > 0 ? fmt.eur0(c.auto_approve_limit) : 'every order reviewed' }),
-      h('td', {}, c.strict_allergens.length ? h('div', { class: 'mini-chips' }, c.strict_allergens.map((a) => h('span', { class: 'mini-chip', text: `never ${S.vocab.allergens[a] || a}` }))) : '–'),
-      h('td', {}, c.status === 'unverified'
-        ? h('button', { class: 'btn btn-small', type: 'button', text: 'Verify & whitelist', disabled: !c.business_id_valid, onClick: () => verifyCustomer(c) })
+      h('td', { class: 'num', text: fmt.eur(o.total) }),
+      h('td', {}, o.status === 'placed' && o.cancellable_until && new Date(o.cancellable_until) > new Date()
+        ? h('button', { class: 'btn btn-small', type: 'button', text: 'Cancel', title: `Possible until ${fmt.dateTime(o.cancellable_until)}`,
+          onClick: () => cancelOrder(o, () => loadMyOrders()) })
         : null)))))));
-}
-
-async function verifyCustomer(c) {
-  try {
-    await api(`/api/customers/${c.id}/verify`, { method: 'POST' }); // recorded as the signed-in staff member
-    loadCustomersPage();
-  } catch (e) { alert(e.message); }
-}
-
-function initRegisterForm() {
-  const bid = $('#reg-bid');
-  const hint = $('#reg-bid-hint');
-  bid.addEventListener('input', () => {
-    const v = bid.value.trim();
-    if (!v) { hint.textContent = ''; hint.className = 'hint'; return; }
-    const ok = validYTunnus(v);
-    hint.textContent = ok ? '✓ Y-tunnus checksum OK' : '✕ Not a valid Y-tunnus (format 1234567-8, check digit must match)';
-    hint.className = `hint ${ok ? 'ok' : 'bad'}`;
-  });
-  $('#register-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const name = $('#reg-name').value.trim();
-    const status = $('#reg-status');
-    if (name.length < 2) { status.textContent = 'Enter the business name.'; status.className = 'run-status bad'; return; }
-    try {
-      const c = await api('/api/customers', { method: 'POST', body: { name, segment: $('#reg-segment').value, business_id: bid.value.trim() } });
-      status.textContent = `${c.name} registered as ${c.id}: not on the whitelist yet, so its orders go to the review queue.`;
-      status.className = 'run-status';
-      e.target.reset();
-      hint.textContent = '';
-      await loadCustomersPage();
-    } catch (err) { status.textContent = err.message; status.className = 'run-status bad'; }
-  });
-}
-
-// ====================================================================== audit page
-function actorChip(actor) {
-  const [kind, who] = actor.split(':');
-  const label = { customer: `Customer ${who || ''}`, agent: 'Agent', policy: 'Policy', human: `Valio Aimo · ${who || ''}`, system: 'System' }[kind] || actor;
-  const cls = { agent: 'actor-agent', human: 'actor-person', policy: 'actor-policy' }[kind] || '';
-  return h('span', { class: `actor ${cls}`, text: label.trim() });
-}
-
-async function loadAudit(subject = S.auditSubject) {
-  S.auditSubject = null;
-  let res;
-  try {
-    res = await api(`/api/audit${subject ? `?subject=${encodeURIComponent(subject)}` : ''}`);
-  } catch (e) { $('#audit-list').replaceChildren(h('li', { class: 'empty', text: e.message })); return; }
-  const chain = res.chain;
-  const toolbar = [
-    chain.valid ? toneChip('good', '✓', `Hash chain intact · ${fmt.num(chain.count)} events`) : toneChip('critical', '✕', `Chain broken at event #${chain.broken_at}`),
-  ];
-  if (subject) toolbar.push(h('span', {}, 'Showing ', h('strong', { text: subject }), ' · ', h('button', { class: 'link-button', type: 'button', text: 'show everything', onClick: () => loadAudit('') })));
-  $('#audit-toolbar').replaceChildren(...toolbar);
-  $('#audit-list').replaceChildren(...(res.events.length ? res.events.map((e) => h('li', { class: 'event' },
-    h('time', { datetime: e.ts, text: fmt.dateTime(e.ts) }),
-    actorChip(e.actor),
-    h('div', { class: 'event-body' },
-      h('p', { text: e.summary }),
-      h('div', { class: 'event-meta' },
-        h('button', { class: 'link-button', type: 'button', text: e.subject, title: 'Show only this', onClick: () => loadAudit(e.subject) }),
-        h('code', { text: e.action }),
-        h('span', { title: `hash ${e.hash}\nprevious ${e.prev_hash}`, text: `#${e.seq} · ${e.hash.slice(0, 10)}…` })),
-      Object.keys(e.data || {}).length ? h('details', {}, h('summary', { text: 'Details' }), h('pre', { text: JSON.stringify(e.data, null, 2) })) : null)))
-    : [h('li', { class: 'empty', text: 'No events yet. Place an order to see the trail.' })]));
-}
-
-// ====================================================================== analytics dashboard
-function analyticsTable(headers, rows, className = '') {
-  return h('table', { class: className },
-    h('thead', {}, h('tr', {}, headers.map((header) => h('th', { text: header })))),
-    h('tbody', {}, rows));
-}
-
-async function loadAnalytics() {
-  const root = $('#analytics-dashboard');
-  if (!root) return;
-  root.setAttribute('aria-busy', 'true');
-  $('#analytics-error').hidden = true;
-  try {
-    const data = await api('/api/admin/analytics');
-    let market;
-    try {
-      market = await api('/api/admin/market-snapshot');
-    } catch (error) {
-      market = { error: error.message, items: [], summary: { monitored: 0, priced: 0, available: 0, terminal: 0, attention: 0, avg_unit_price: null } };
-    }
-    renderAnalytics(data, market);
-    S.analyticsLoaded = true;
-  } catch (error) {
-    $('#analytics-error').textContent = error.message;
-    $('#analytics-error').hidden = false;
-  } finally {
-    root.removeAttribute('aria-busy');
-  }
-}
-
-function renderAnalytics(data, market) {
-  const { summary, categories } = data;
-  const watch = market.summary;
-  $('#analytics-kpis').replaceChildren(
-    kpi('Watchlist available', market.error ? 'n/a' : `${fmt.num(watch.available)} / ${fmt.num(watch.monitored)}`, market.error ? 'Live check unavailable' : `${fmt.num(watch.attention)} needs attention`),
-    kpi('Average unit price', watch.avg_unit_price == null ? 'n/a' : fmt.eur(watch.avg_unit_price), `${fmt.num(watch.priced)} live prices returned`),
-    kpi('Supplier fulfilment', fmt.num(watch.terminal), 'items supplied from terminal stock'),
-    kpi('Products analysed', fmt.num(summary.products), `${fmt.num(summary.categories)} product groups`),
-    kpi('Average carbon footprint', summary.avg_co2 == null ? 'n/a' : fmt.num(summary.avg_co2, 2), `kg CO₂e/kg · ${fmt.num(summary.carbon_products)} products with data`),
-    kpi('Delivery reliability', fmt.pct(summary.avg_reliability), `${fmt.num(summary.reliability_products)} products with data`),
-  );
-
-  const priced = market.items.filter((item) => item.unit_price != null).sort((a, b) => b.unit_price - a.unit_price);
-  $('#analytics-price').replaceChildren(
-    h('h3', { text: 'Price watch' }),
-    market.error ? h('p', { class: 'empty', text: 'Live price data is unavailable.' }) : barList(priced.map((item) => ({
-      id: item.id, label: item.name, sublabel: `Category ${item.category} · per ${unitWord(item.sales_unit)}`,
-      value: item.unit_price, valueText: fmt.eur(item.unit_price),
-      tooltip: [['Product', item.name], ['Unit price', fmt.eur(item.unit_price)], ['Availability', item.availability]],
-    })), { ariaLabel: 'Live unit prices in the operational watchlist' }),
-  );
-  const availabilityGroups = [
-    ['Available now', market.items.filter((item) => item.availability === 'ok').length, 'good'],
-    ['Supplier / terminal', market.items.filter((item) => item.logistic_model === 'Terminal').length, 'info'],
-    ['Needs attention', watch.attention, 'warning'],
-  ];
-  $('#analytics-availability').replaceChildren(
-    h('h3', { text: 'Availability watch' }),
-    market.error ? h('p', { class: 'empty', text: 'Live availability data is unavailable.' }) : barList(availabilityGroups.map(([label, value, kind]) => ({ id: label, label, sublabel: 'of monitored products', value, valueText: fmt.num(value), tags: [{ text: kind === 'good' ? 'ready' : kind, kind }] })), { ariaLabel: 'Availability status in the operational watchlist' }),
-  );
-  $('#analytics-market-note').textContent = market.error
-    ? `Live price and stock checks are unavailable: ${market.error}`
-    : `Checked ${fmt.time(market.checked_at)} for delivery on ${fmt.day(market.requested_date)}. The watchlist is limited to ${fmt.num(watch.monitored)} representative SKUs to respect Valio Aimo API usage limits.`;
-
-  const carbonGroups = categories.filter((group) => group.avg_co2 != null)
-    .sort((a, b) => b.avg_co2 - a.avg_co2).slice(0, 12);
-  const reliabilityGroups = categories.filter((group) => group.avg_reliability != null)
-    .sort((a, b) => a.avg_reliability - b.avg_reliability).slice(0, 12);
-  $('#analytics-carbon').replaceChildren(barList(carbonGroups.map((group) => ({
-    id: group.category,
-    label: group.category,
-    sublabel: `${fmt.num(group.products)} products · ${fmt.num(group.carbon_products)} carbon records`,
-    value: group.avg_co2,
-    valueText: `${fmt.num(group.avg_co2, 2)} kg CO₂e/kg`,
-    tooltip: [['Products', fmt.num(group.products)], ['Carbon data coverage', fmt.num(group.carbon_products)]],
-  })), { ariaLabel: 'Highest average carbon footprint by product group' }),
-  h('p', { class: 'chart-caption', text: `Highest averages · ${fmt.num(categories.filter((group) => group.avg_co2 != null).length)} groups with carbon data` }));
-  $('#analytics-reliability').replaceChildren(barList(reliabilityGroups.map((group) => ({
-    id: group.category,
-    label: group.category,
-    sublabel: `${fmt.num(group.products)} products · ${fmt.num(group.reliability_products)} reliability records`,
-    value: group.avg_reliability,
-    valueText: fmt.pct(group.avg_reliability),
-    tooltip: [['Products', fmt.num(group.products)], ['Reliability data coverage', fmt.num(group.reliability_products)]],
-  })), { ariaLabel: 'Lowest average delivery reliability by product group' }),
-  h('p', { class: 'chart-caption', text: `Lowest averages · ${fmt.num(categories.filter((group) => group.avg_reliability != null).length)} groups with reliability data` }));
-
-  const categoryRows = categories.map((group) => h('tr', {},
-    h('td', { text: group.category }),
-    h('td', { class: 'num', text: fmt.num(group.products) }),
-    h('td', { class: 'num', text: fmt.num(group.carbon_products) }),
-    h('td', { class: 'num', text: group.avg_co2 == null ? 'n/a' : fmt.num(group.avg_co2, 3) }),
-    h('td', { class: 'num', text: fmt.num(group.reliability_products) }),
-    h('td', { class: 'num', text: fmt.pct(group.avg_reliability) })));
-  $('#analytics-categories').replaceChildren(h('div', { class: 'table-wrap analytics-table-wrap' }, analyticsTable(
-    ['Product group', 'Products', 'Carbon records', 'Avg. kg CO₂e/kg', 'Reliability records', 'Avg. reliability'],
-    categoryRows,
-    'analytics-table',
-  )));
 }
 
 // ====================================================================== explore page
@@ -1204,9 +1143,8 @@ function renderSignIn(message = '') {
   const keep = sel.value || storage.get('aimo.customer', 'C-1001');
   sel.replaceChildren(...customers.map((c) => h('option', { value: c.id, text: c.name })));
   if (customers.some((c) => c.id === keep)) sel.value = keep;
-  $('#signin-name').value = $('#signin-name').value || storage.get('aimo.reviewer', '');
   document.querySelectorAll('.signin-password').forEach((el) => { el.hidden = s.password_required === false; });
-  const note = message || (s.password_required === false ? 'Local development: no passwords are set on this server, so signing in needs none.' : '');
+  const note = message || (s.password_required === false ? 'Local development: no password is set on this server, so signing in needs none.' : '');
   $('#signin-status').textContent = note;
   $('#signin-status').hidden = !note;
 }
@@ -1216,7 +1154,6 @@ function showSignIn(message = '') {
   for (const p of PAGES) $(`#page-${p}`).hidden = true;
   $('.main-nav').hidden = true;
   $('#session-box').hidden = true;
-  $('#admin-open').hidden = false;
   $('#page-signin').hidden = false;
   hideTip();
   renderSignIn(message);
@@ -1240,29 +1177,11 @@ async function signIn(form, body) {
 }
 
 function initSignIn() {
-  $('#admin-open').addEventListener('click', () => {
-    $('#admin-dialog').showModal();
-    $('#signin-name').focus();
-  });
-  $('#admin-close').addEventListener('click', () => $('#admin-dialog').close());
   $('#signin-buyer').addEventListener('submit', (e) => {
     e.preventDefault();
     const customer = $('#signin-customer').value;
     storage.set('aimo.customer', customer);
-    signIn(e.target, { role: 'buyer', customer_id: customer, password: $('#signin-buyer-password').value });
-  });
-  $('#signin-valio').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const name = $('#signin-name').value.trim();
-    if (!name) {
-      const error = e.target.querySelector('.signin-error');
-      error.textContent = 'Enter your name: it is recorded with your decisions.';
-      error.hidden = false;
-      $('#signin-name').focus();
-      return;
-    }
-    storage.set('aimo.reviewer', name);
-    signIn(e.target, { role: 'valio', name, password: $('#signin-valio-password').value });
+    signIn(e.target, { customer_id: customer, password: $('#signin-buyer-password').value });
   });
   $('#sign-out').addEventListener('click', async () => {
     try { await api('/api/session/logout', { method: 'POST' }); } catch { /* reload either way */ }
@@ -1276,12 +1195,10 @@ function showPortal() {
   const s = S.session;
   document.body.dataset.role = s.role;
   $('#session-who').replaceChildren(h('strong', { text: s.name }),
-    h('span', { class: 'muted', text: s.role === 'buyer' ? ' · buyer portal' : ' · Valio Aimo admin' }));
+    h('span', { class: 'muted', text: ' · buyer portal' }));
   $('#session-box').hidden = false;
-  $('#admin-open').hidden = true;
   document.querySelectorAll('.main-nav a').forEach((a) => { a.hidden = !a.dataset.roles.split(' ').includes(s.role); });
   $('.main-nav').hidden = false;
-  $('#reviewer-note').textContent = s.role === 'valio' ? `Your decisions are recorded as ${s.name} (Valio Aimo).` : '';
 }
 
 async function init() {
@@ -1293,17 +1210,13 @@ async function init() {
   try { S.customers = await api('/api/customers'); } catch (e) { setStatus(e.message, true); }
   $('#explore-form').addEventListener('submit', (e) => { e.preventDefault(); S.explore.category = ''; runExplore(); });
 
-  if (S.session.role === 'buyer') {
-    renderCustomer();
-    renderExamples();
-    $('#request-text').addEventListener('input', () => markDirty(true));
-    $('#request-form').addEventListener('submit', (e) => { e.preventDefault(); sendMessage(); });
-    $('#request-text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendMessage(); });
-    updateOrderControls();
-  } else {
-    initRegisterForm();
-    refreshReviewCount();
-  }
+  renderExamples();
+  initVoice();
+  initApproval();
+  $('#request-text').addEventListener('input', () => markDirty(true));
+  $('#request-form').addEventListener('submit', (e) => { e.preventDefault(); sendMessage(); });
+  $('#request-text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendMessage(); });
+  updateOrderControls();
   window.addEventListener('hashchange', route);
   window.addEventListener('scroll', hideTip, { passive: true });
   route();
