@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from contracts.models import Decision, Offer, Order, ParsedRequest
 from gateway import app as gateway_app
+from gateway.catalog import Catalog
 from gateway.config import TZ, settings
 from gateway.store import Store
 from trust.audit import AuditLog
@@ -92,11 +93,29 @@ class PortalTests(unittest.TestCase):
         self.assertEqual(self.login(role='valio', name='Anna', password='buyer-pw').status_code, 422)
         self.login(customer_id='C-1001', password='buyer-pw')
         for method, path in (('post', '/api/orders/O-0001/decision'), ('get', '/api/audit'), ('post', '/api/admin/reset'),
-                             ('post', '/api/customers/C-2001/verify')):
+                             ('post', '/api/customers/C-2001/verify'), ('get', '/api/admin/analytics'),
+                             ('get', '/api/admin/market-snapshot')):
             with self.subTest(path=path):
                 self.assertIn(getattr(self.client, method)(path).status_code, (404, 405))
         old_admin = gateway_app.S.sessions.issue(Principal(role='valio', name='Anna'))
         self.assertIsNone(gateway_app.S.sessions.read(old_admin))  # admin sessions from before end
+
+    def test_explore_returns_aggregates_only(self):
+        products = [
+            {"id": "secret-1", "name": "Milk Alpha", "name_fi": "", "category": "dairy", "country": "fi",
+             "co2": 1.5, "reliability": 0.9, "claims": [], "labels": []},
+            {"id": "secret-2", "name": "Milk Beta", "name_fi": "", "category": "dairy", "country": "se",
+             "co2": 2.5, "reliability": None, "claims": [], "labels": []},
+        ]
+        with patch.object(gateway_app.S, 'catalog', Catalog(products)):
+            self.assertEqual(self.client.get('/api/catalog/search?q=milk').status_code, 401)
+            self.login(customer_id='C-1001', password='buyer-pw')
+            explore = self.client.get('/api/catalog/search?q=milk').json()
+            self.assertEqual(explore['kpis']['total'], 2)
+            self.assertEqual(explore['groups'][0]['co2'], 2.0)
+            self.assertNotIn('results', explore)
+            self.assertNotIn('Milk Alpha', str(explore))
+            self.assertNotIn('secret-1', str(explore))
 
     def test_sign_out_ends_the_session(self):
         self.login(customer_id='C-1001', password='buyer-pw')

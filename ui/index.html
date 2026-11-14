@@ -27,6 +27,7 @@
   </header>
 
   <main>
+
     <!-- ======================================================= SIGN IN -->
     <section id="page-signin" class="page" hidden>
       <section class="home-intro" aria-labelledby="home-title">
@@ -149,18 +150,16 @@
     <section id="page-explore" class="page" hidden>
       <div class="hero hero-compact">
         <div class="container">
-          <p class="eyebrow">Assortment</p>
-          <h1>Explore the catalog</h1>
-          <p class="lead">See what exists before you order: how many options match, which ones carry the labels you care
-            about, and how product groups compare on carbon footprint.</p>
+          <p class="eyebrow">Assortment insights</p>
+          <h1>Explore product data</h1>
+          <p class="lead">Explore product-group trends and sustainability information through aggregated statistics. Product, supplier, customer and order-level details are not shown here.</p>
         </div>
       </div>
       <div class="container">
         <form id="explore-form" class="filter-row" novalidate>
-          <input id="explore-q" type="search" placeholder="Search, e.g. burger, milk, salmon, potatoes" aria-label="Search products" value="burger">
+          <input id="explore-q" type="search" placeholder="Filter aggregates, e.g. burger, milk, potatoes" aria-label="Filter product-group aggregates" value="burger">
           <div id="explore-facets" class="facet-chips" role="group" aria-label="Filters"></div>
-          <label class="field-inline date-inline" for="explore-date">Price date <input id="explore-date" type="date"></label>
-          <button class="btn btn-primary btn-small" type="submit">Search</button>
+          <button class="btn btn-primary btn-small" type="submit">Update insights</button>
         </form>
         <div id="explore-body"></div>
       </div>

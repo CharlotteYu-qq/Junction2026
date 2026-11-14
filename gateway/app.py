@@ -567,12 +567,12 @@ def _mean(values: list[float]) -> float | None:
 
 @app.get("/api/catalog/search", tags=["catalog"])
 def catalog_search(
+    who: Principal = Depends(signed_in),
     q: str = Query(min_length=2, max_length=80),
     filters: str = Query(default="", description="comma-separated, e.g. claim:VEGAN,origin:fi"),
     category: str = "",
-    limit: int = Query(default=40, ge=1, le=100),
 ):
-    """Explore the static assortment (no live API calls): facets, product groups with CO2e, results."""
+    """Explore the assortment using aggregate metrics only; product-level data is not exposed here."""
     _need_catalog()
     phrases = rules_parser.query_phrases(q)
     matches = [p for p, _ in S.catalog.search(phrases, limit=800)]
@@ -589,27 +589,24 @@ def catalog_search(
     for cat, ps in groups_map.items():
         co2 = [p["co2"] for p in ps if p.get("co2") is not None]
         rel = [p["reliability"] for p in ps if p.get("reliability") is not None]
-        groups.append({"category": cat, "count": len(ps), "co2": _mean(co2), "reliability": _mean(rel), "example": ps[0]["name"]})
+        groups.append({"category": cat, "count": len(ps), "co2": _mean(co2), "reliability": _mean(rel)})
     groups.sort(key=lambda g: (g["co2"] is None, -(g["co2"] or 0)))
     if category:
         filtered = [p for p in filtered if p.get("category") == category]
     rel = [p["reliability"] for p in filtered if p.get("reliability") is not None]
-    keep = ("id", "name", "brand", "vendor", "category", "sales_unit", "content", "content_unit", "claims", "labels",
-            "contains", "may_contain", "country", "reliability", "co2")
+    co2 = [p["co2"] for p in filtered if p.get("co2") is not None]
     return {
-        "query": q,
-        "phrases": phrases,
         "total": len(filtered),
         "facets": facets,
-        "groups": groups[:12],
+        "groups": groups,
         "groups_total": len(groups),
         "kpis": {
             "total": len(filtered),
             "with_reliability": len(rel),
             "avg_reliability": _mean(rel),
-            "with_co2": sum(1 for p in filtered if p.get("co2") is not None),
+            "with_co2": len(co2),
+            "avg_co2": _mean(co2),
         },
-        "results": [{k: p.get(k) for k in keep} for p in filtered[:limit]],
     }
 
 

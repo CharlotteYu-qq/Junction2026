@@ -21,7 +21,7 @@ The site opens on a buyer-focused landing page where buyers sign in. Locally, wi
 |---|---|
 | **Order** | Talk to the ordering agent in plain words (English, Finnish or Swedish; typed or spoken). It asks for anything missing, checks live prices and stock, and shows ranked options with its recommendation. You choose an option and click **Place order**; outside the agent's authority, a dialog asks a person to approve by typing their full name |
 | **My orders** | Your orders: placed within the agent's authority, approved by a named person, or cancelled. A placed order can be cancelled until the order cut-off of its delivery |
-| **Explore** | Catalog explorer with label/diet filters and a carbon-footprint-by-product-group chart that you can click to filter |
+| **Explore** | Search and filter aggregate product-group insights; product and supplier records, prices, customers and orders are not exposed |
 
 Sign in as a buyer and use the example buttons on the Order page for the demo scenarios. Every step is still written to the hash-chained audit log in `data/runtime/audit.jsonl`.
 
