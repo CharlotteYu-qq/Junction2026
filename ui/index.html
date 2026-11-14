@@ -3,16 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Valio Aimo · Agent Gateway</title>
+  <title>Valio Aimo</title>
   <meta name="description" content="A smarter, more controlled way for professional kitchens to order from Valio Aimo.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23005670'/%3E%3Cpath d='M9 22 16 9l7 13' stroke='%23c0e021' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&family=Playfair+Display:ital,wght@1,600&display=swap">
+  <link rel="stylesheet" href="theme-valio.css">
 </head>
 <body>
   <header class="site-header">
     <div class="container header-inner">
-      <a class="brand" href="#" aria-label="Aimo Agent Gateway home">
-        <span class="brand-word">Aimo</span><span class="brand-tag">Agent Gateway</span>
+      <a class="brand" href="#" aria-label="Aimo home">
+        <span class="brand-word">Aimo</span>
       </a>
       <nav class="main-nav" aria-label="Main" hidden>
         <a href="#order" data-page="order" data-roles="buyer">Order</a>
@@ -98,9 +102,8 @@
         <div class="container">
           <p class="eyebrow">Order assistant</p>
           <h1>What does your kitchen need?</h1>
-          <p class="lead">Describe it in your own words. The agent asks for anything missing, checks live prices and availability with
-            Valio Aimo and recommends the best option. You choose and place the order; outside the agent's limit, a named
-            person approves it.</p>
+          <p class="lead">Just say it the way you would to a colleague. We check live prices and stock,
+            suggest the best match, and you decide what to order.</p>
         </div>
       </div>
       <div class="container">
@@ -137,12 +140,44 @@
         <div class="container">
           <p class="eyebrow">Buyer portal</p>
           <h1>My orders</h1>
-          <p class="lead">Your orders: placed within the agent's authority, approved by a named person in your
-            organisation, or cancelled. A placed order can be cancelled until the order cut-off of its delivery.</p>
+          <p class="lead">Everything you have ordered, in one place. Changed your mind? You can cancel an order
+            until its cut-off time.</p>
         </div>
       </div>
       <div class="container">
+        <h2 class="section-title">Placed in this portal</h2>
         <div id="my-orders"></div>
+        <section id="order-history" class="order-history" aria-labelledby="history-title" hidden>
+          <div class="history-head">
+            <h2 class="section-title" id="history-title">Order history</h2>
+            <span id="history-period" class="muted small"></span>
+          </div>
+          <div id="history-kpis" class="kpi-row"></div>
+          <section class="panel history-monthly-panel"><h3>Spend per month</h3><div id="history-monthly"></div></section>
+          <div class="history-grid">
+            <section class="panel"><h3>Top items by spend</h3><div id="history-items"></div></section>
+            <div class="history-stack">
+              <section class="panel"><h3>How orders were placed</h3><div id="history-channels"></div></section>
+              <section class="panel"><h3>Who ordered</h3><div id="history-people"></div></section>
+            </div>
+          </div>
+          <section class="panel">
+            <div class="panel-head">
+              <h3>Past orders</h3>
+              <form id="history-filter" class="history-filter" role="search">
+                <input id="history-q" type="search" placeholder="Search items, products, people" aria-label="Search past orders">
+                <select id="history-status" aria-label="Filter by status">
+                  <option value="">All orders</option>
+                  <option value="delivered">Delivered</option>
+                  <option value="short">Delivered short</option>
+                  <option value="cancelled">Cancelled</option>
+                  <option value="confirmed">Confirmed, not yet delivered</option>
+                </select>
+              </form>
+            </div>
+            <div id="history-orders"></div>
+          </section>
+        </section>
       </div>
     </section>
 
@@ -152,15 +187,13 @@
         <div class="container">
           <p class="eyebrow">Assortment insights</p>
           <h1>Explore product data</h1>
-          <p class="lead">Explore product-group trends and sustainability information through aggregated statistics. Product, supplier, customer and order-level details are not shown here.</p>
+          <p class="lead">Browse the assortment by category and see how product groups compare on carbon footprint and delivery reliability.</p>
         </div>
       </div>
       <div class="container">
-        <form id="explore-form" class="filter-row" novalidate>
-          <input id="explore-q" type="search" placeholder="Filter aggregates, e.g. burger, milk, potatoes" aria-label="Filter product-group aggregates" value="burger">
-          <div id="explore-facets" class="facet-chips" role="group" aria-label="Filters"></div>
-          <button class="btn btn-primary btn-small" type="submit">Update insights</button>
-        </form>
+        <h2 class="section-title explore-section-title">Browse the assortment</h2>
+        <div id="explore-departments" class="dept-grid" role="group" aria-label="Product groups"></div>
+        <div id="explore-subdepartments" class="facet-chips sub-departments" role="group" aria-label="Departments in this group" hidden></div>
         <div id="explore-body"></div>
       </div>
     </section>
@@ -192,7 +225,7 @@
 
   <footer class="site-footer">
     <div class="container footer-inner">
-      <span>Valio Aimo · Agent Gateway</span>
+      <span>Valio Aimo</span>
     </div>
   </footer>
 

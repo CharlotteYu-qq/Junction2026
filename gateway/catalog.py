@@ -192,7 +192,8 @@ def build_slim(valio_dir: Path) -> list[dict]:
                 "category": p.get("category"),
                 "sales_unit": sales_unit,
                 "base_unit": base_unit,
-                "lot": p.get("allowedLotSize") or 1,
+                # Valio: a lot size of 0.01 is a technical value and means 1 (no 0.01 boxes)
+                "lot": _lot(p.get("allowedLotSize")),
                 "units": units,
                 "temp": p.get("temperatureCondition"),
                 "country": p.get("countryOfOrigin"),
@@ -211,8 +212,19 @@ def build_slim(valio_dir: Path) -> list[dict]:
     return products
 
 
+def _lot(value) -> float:
+    """Valio: an allowed lot size of 0.01 is a technical value and means 1 (there are no 0.01 boxes)."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 1
+    return 1 if value <= 0.01 else value
+
+
 class Catalog:
     def __init__(self, products: list[dict]):
+        for p in products:  # also fixes catalogs cached before this rule
+            p["lot"] = _lot(p.get("lot"))
         self.products = products
         self.by_id = {p["id"]: p for p in products}
         self._index = []
@@ -303,6 +315,75 @@ class Catalog:
         scored.sort(key=lambda t: t[1], reverse=True)
         floor = 0.5 * scored[0][1]
         return [t for t in scored if t[1] >= floor][:limit]
+
+
+DEPARTMENTS = [  # (id, name), in the order the Explore page shows them
+    ("dairy", "Dairy & eggs"), ("fats", "Fats & oils"), ("bakery", "Bakery & biscuits"), ("produce", "Fruit & vegetables"),
+    ("meat", "Meat & poultry"), ("fish", "Fish & seafood"), ("deli", "Deli & ready meals"), ("frozen", "Frozen food"),
+    ("dry", "Dry goods & preserves"), ("spices", "Spices & baking"), ("coffee", "Coffee, tea & cocoa"), ("drinks", "Cold drinks"),
+    ("sweets", "Sweets & snacks"), ("kitchen", "Kitchen equipment"), ("disposables", "Disposables & tableware"),
+    ("cleaning", "Cleaning, hygiene & paper"), ("other", "Other non-food"),
+]
+DEPARTMENT_NAMES = dict(DEPARTMENTS)
+
+# The few top-level groups the Explore page starts from; each holds departments.
+DEPARTMENT_GROUPS = [  # (id, name, department ids)
+    ("fresh", "Fresh & chilled", ["dairy", "fats", "meat", "fish", "produce", "deli", "bakery"]),
+    ("frozen", "Frozen", ["frozen"]),
+    ("pantry", "Pantry", ["dry", "spices", "sweets"]),
+    ("drinks", "Drinks", ["drinks", "coffee"]),
+    ("nonfood", "Non-food", ["kitchen", "disposables", "cleaning", "other"]),
+]
+GROUP_DEPARTMENTS = {gid: set(depts) for gid, _, depts in DEPARTMENT_GROUPS}
+assert sorted(d for _, _, ds in DEPARTMENT_GROUPS for d in ds) == sorted(DEPARTMENT_NAMES), "every department in one group"
+
+
+def department_of(code: str | None) -> str:
+    """The department a category code belongs to. The codes are hierarchical (104xx milk, 106xx cheese,
+    1870x fish, 1872x beef, 41xxx frozen, 63xxx cleaning ...), so the department follows from the prefix."""
+    c = code or ""
+    rules = [
+        (("1059",), "dairy"),  # eggs
+        (("105",), "fats"),
+        (("109", "110"), "bakery"),
+        (("10",), "dairy"),
+        (("172", "173"), "deli"),
+        (("174",), "produce"),
+        (("1870",), "fish"),
+        (("18",), "meat"),
+        (("20000",), "other"),  # pet food
+        (("20",), "kitchen"),
+        (("2140",), "drinks"),  # juices, smoothies, berry soups (2145x jams and 2146x nuts stay dry goods)
+        (("2199", "2115"), "sweets"),  # chips and savoury snacks, snack bars
+        (("211", "212"), "bakery"),  # rusks, crackers, biscuits, crispbread
+        (("221",), "dry"),  # sugar, syrup, honey, sweeteners
+        (("21",), "dry"),
+        (("223", "224", "225"), "coffee"),
+        (("226",), "spices"),
+        (("227",), "drinks"),
+        (("41",), "frozen"),
+        (("52",), "sweets"),
+        (("63",), "cleaning"),
+        (("64",), "disposables"),
+        (("84", "85"), "drinks"),
+    ]
+    for prefixes, dept in rules:
+        if c.startswith(prefixes):
+            return dept
+    return "other"
+
+
+_CATEGORY_NAMES: dict[str, str] | None = None
+
+
+def category_name(code: str | None) -> str:
+    """A readable name for a category code. The challenge data has codes only; the names are hand-checked
+    (scripts/name_categories.py writes gateway/category_names.json)."""
+    global _CATEGORY_NAMES
+    if _CATEGORY_NAMES is None:
+        path = Path(__file__).with_name("category_names.json")
+        _CATEGORY_NAMES = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    return _CATEGORY_NAMES.get(code or "", f"Category {code}" if code else "Uncategorised")
 
 
 def load_catalog(valio_dir: Path) -> Catalog:

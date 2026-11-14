@@ -7,6 +7,7 @@
 
 # Challenge datasets (download from the portal, don't redistribute)
 data/*
+!data/Userdata
 !data/README.md
 
 # Pitch material (kept local, not published)

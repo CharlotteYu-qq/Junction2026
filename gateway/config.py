@@ -28,6 +28,7 @@ class Settings:
     valio_dir: Path = field(default=ROOT / "data" / "valio")
     runtime_dir: Path = field(default=ROOT / "data" / "runtime")
     ui_dir: Path = field(default=ROOT / "ui")
+    history_dir: Path = field(default=ROOT / "data" / "Userdata" / "order_history")  # synthetic order history
 
 
 settings = Settings()

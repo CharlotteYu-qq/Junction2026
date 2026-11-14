@@ -21,19 +21,21 @@ from agent import dialogue, rules_parser
 from agent.service import claude_available, parse_conversation, parse_request
 from contracts import vocab
 from contracts.models import Customer, Offer, Order, ParsedRequest
-from gateway.catalog import load_catalog
+from gateway.catalog import DEPARTMENT_GROUPS, DEPARTMENT_NAMES, GROUP_DEPARTMENTS, category_name, department_of, load_catalog
 from gateway.config import TZ, settings
+from gateway import habits, history, recommend
+from gateway.alternatives import suggest_fixes, verify_date_fixes
 from gateway.planner import _availability, _parse_dt, _price_info, build_offer, describe_item, verify_offer
 from gateway.store import Store
 from gateway.valio_client import ValioAPIError, ValioClient
 from trust.audit import AuditLog
 from trust.auth import COOKIE, SESSION_SECONDS, Principal, SessionSigner, password_ok
 from trust.customers import CustomerRegistry, trust_profile
-from trust.policy import eur, evaluate, has_claim
+from trust.policy import PurchaseHistory, eur, evaluate, has_claim
 from trust.signing import Signer
 
 S = SimpleNamespace(catalog=None, catalog_error=None, valio=None, signer=None, customers=None, audit=None, store=None,
-                    sessions=None, ping=(0.0, False))
+                    sessions=None, history={}, ping=(0.0, False))
 
 OUTCOME_LABEL = {"auto_approve": "approved automatically", "needs_approval": "needs a person", "reject": "rejected"}
 
@@ -53,6 +55,9 @@ async def lifespan(_app: FastAPI):
     S.audit = AuditLog(settings.runtime_dir / "audit.jsonl")
     S.store = Store(settings.runtime_dir)
     S.sessions = SessionSigner(settings.runtime_dir / "session_secret")
+    S.history = recommend.load_history(settings.history_dir)
+    if S.history:
+        print(f"Order history loaded: {sum(map(len, S.history.values())):,} orders for {len(S.history)} customers", flush=True)
     yield
     await S.valio.close()
 
@@ -251,6 +256,56 @@ def list_customers(who: Principal = Depends(buyer)):
     return [_customer_out(_customer(who.customer_id))]
 
 
+def _orders_for(customer_id: str) -> list[dict]:
+    """The customer's order history: the synthetic history file plus every order placed in this portal
+    (data/runtime/orders.json), in one shape, oldest first."""
+    today = _today()
+    live = [history.from_portal(o, S.store.offers.get(o.offer_id), today)
+            for o in S.store.list_orders() if o.customer_id == customer_id]
+    return sorted(S.history.get(customer_id, []) + [o for o in live if o], key=lambda o: o["ordered_at"])
+
+
+def _purchase_history(customer_id: str) -> PurchaseHistory | None:
+    """What the customer has bought before (cancelled orders left out), for the policy's new-product and
+    largest-order checks. None for a customer without history: those checks then do not apply."""
+    orders = [o for o in _orders_for(customer_id) if o.get("status") != "cancelled"]
+    if not orders:
+        return None
+    totals = [o["total"] for o in orders if o.get("total")]
+    return PurchaseHistory(
+        known_products=frozenset(line["product_id"] for o in orders for line in o["lines"] if line.get("product_id")),
+        largest_order=max(totals) if totals else None,
+    )
+
+
+@app.get("/api/suggestions", tags=["history"])
+def suggestions(who: Principal = Depends(buyer)):
+    """Reorder suggestions from the signed-in customer's own order history, ranked by a published formula
+    (see `formula`; every suggestion carries its components). Clicking one still runs the full flow:
+    a fresh offer with live prices and the usual checks. `ranked` lists every regular item with its score."""
+    orders = _orders_for(who.customer_id)
+    today = _today()
+    return {
+        "formula": recommend.FORMULA,
+        "suggestions": recommend.suggest(orders, today) if orders else [],
+        "ranked": recommend.score_items(orders, today)[:10] if orders else [],
+    }
+
+
+@app.get("/api/history/stats", tags=["history"])
+def history_stats(who: Principal = Depends(buyer)):
+    """Statistics over the signed-in customer's own order history (synthetic demo data)."""
+    orders = _orders_for(who.customer_id)
+    return {"available": bool(orders), **(history.stats(orders, _today()) if orders else {})}
+
+
+@app.get("/api/history/orders", tags=["history"])
+def history_orders(q: str = Query("", max_length=80), status: Literal["", "delivered", "cancelled", "confirmed", "short"] = "",
+                   offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), who: Principal = Depends(buyer)):
+    """The signed-in customer's own past orders, newest first, filtered and paged."""
+    return history.page(_orders_for(who.customer_id), q.strip(), status, offset, limit)
+
+
 # ----------------------------------------------------------------------------- requests & offers
 
 
@@ -284,8 +339,10 @@ async def create_request(body: RequestIn, who: Principal = Depends(buyer)):
         parsed, parse_ms = await parse_request(
             text, _today(), api_key=settings.anthropic_api_key, mode=settings.parser, model=settings.claude_model
         )
+        used = _apply_habits(customer, parsed, [text], None)
         _audit_understood(customer, parsed)
-    return {**await _offer_response(customer, parsed, text, parse_ms), "notice": _parser_notice(parsed)}
+    return {**await _offer_response(customer, parsed, text, parse_ms), "notice": _parser_notice(parsed),
+            "habits": used if not body.override else []}
 
 
 RULES_NOTICE = ("Our AI assistant is unavailable right now, so a simpler rule-based reader understood this request. "
@@ -311,6 +368,7 @@ async def _offer_response(customer: Customer, parsed: ParsedRequest, text: str, 
     offer = await build_offer(
         customer=customer, parsed=parsed, request_text=text, parse_ms=parse_ms, catalog=S.catalog,
         valio=S.valio, signer=S.signer, ttl_minutes=settings.offer_ttl_minutes,
+        preferred=habits.preferences(parsed, _orders_for(customer.id)),
     )
     S.store.save_offer(offer)
     n_options = sum(len(i.candidates) for i in offer.items)
@@ -321,8 +379,19 @@ async def _offer_response(customer: Customer, parsed: ParsedRequest, text: str, 
         {"customer_id": customer.id, "content_hash": offer.content_hash,
          "operations": [f"{o.name}: {o.detail}" for o in offer.operations]},
     )
-    decision, _ = evaluate(customer, offer, {}, datetime.now(TZ), verify_offer(offer, S.signer))
-    return {"offer": offer.model_dump(mode="json"), "decision": decision.model_dump(mode="json"), "customer": _customer_out(customer)}
+    return {"offer": offer.model_dump(mode="json"), "decision": await _decision_out(customer, offer, {}), "customer": _customer_out(customer)}
+
+
+async def _decision_out(customer: Customer, offer: Offer, selections: dict[int, str]) -> dict:
+    """The policy decision for a selection; when it cannot be placed, also the agent's proposed fixes
+    (each one already checked against the same rules)."""
+    now, integrity_ok = datetime.now(TZ), verify_offer(offer, S.signer)
+    past = _purchase_history(customer.id)
+    decision, _ = evaluate(customer, offer, selections, now, integrity_ok, past)
+    fixes = suggest_fixes(customer, offer, selections, now, integrity_ok, past) if decision.outcome == "reject" else []
+    if fixes:  # a proposed delivery day is only shown when live availability says it can work
+        fixes = await verify_date_fixes(fixes, offer, customer, S.valio, _availability, _parse_dt)
+    return {**decision.model_dump(mode="json"), "fixes": fixes}
 
 
 class ChatTurn(BaseModel):
@@ -346,6 +415,7 @@ async def chat(body: ChatIn, who: Principal = Depends(buyer)):
     customer = _customer(who.customer_id)
     turns = [(m.role, m.text.strip()) for m in body.messages]
     request_text = " · ".join(text for role, text in turns if role == "buyer")
+    used: list[str] = []  # what the agent filled in from the order history
     if body.skip_questions and body.understood is not None:
         parsed, parse_ms = body.understood, 0  # nothing new was said: use what the agent already understood
     else:
@@ -357,6 +427,9 @@ async def chat(body: ChatIn, who: Principal = Depends(buyer)):
             turns, body.understood, _today(), api_key=settings.anthropic_api_key, mode=settings.parser,
             model=settings.claude_model,
         )
+        used = _apply_habits(customer, parsed, [t for r, t in turns if r == "buyer"], body.understood)
+        if used:  # the question (Claude's phrasing) did not know the history: ask again from what is now open
+            question = dialogue.follow_up_question(parsed)
         if question and not body.skip_questions:
             S.audit.append("agent", "agent.asked", customer.id, f"Agent asked {customer.name}: “{_clip(question, 180)}”",
                            {"parser": parsed.parser})
@@ -365,7 +438,17 @@ async def chat(body: ChatIn, who: Principal = Depends(buyer)):
     _need_catalog()
     _audit_understood(customer, parsed)
     return {"kind": "offer", **await _offer_response(customer, parsed, request_text, parse_ms),
-            "notice": _parser_notice(parsed)}
+            "notice": _parser_notice(parsed), "habits": used}
+
+
+def _apply_habits(customer: Customer, parsed: ParsedRequest, buyer_messages: list[str],
+                  previous: Optional[ParsedRequest]) -> list[str]:
+    """Fill "the usual", "same as last time" and missing amounts from the customer's own orders."""
+    used = habits.apply(parsed, buyer_messages, previous, _orders_for(customer.id), _today())
+    if used:
+        S.audit.append("agent", "agent.used_history", customer.id,
+                       f"Agent used {customer.name}'s order history: " + "; ".join(used))
+    return used
 
 
 def _cancel_reply(who: Principal, order_id: Optional[str]) -> dict:
@@ -401,11 +484,10 @@ def get_offer(offer_id: str, who: Principal = Depends(signed_in)):
 
 
 @app.post("/api/offers/{offer_id}/evaluate", tags=["ordering"])
-def evaluate_offer(offer_id: str, body: SelectionIn, who: Principal = Depends(signed_in)):
+async def evaluate_offer(offer_id: str, body: SelectionIn, who: Principal = Depends(signed_in)):
     """Preview the policy decision for a selection, without placing anything."""
     offer = _offer(offer_id, who)
-    decision, _ = evaluate(_customer(offer.customer_id), offer, body.selections, datetime.now(TZ), verify_offer(offer, S.signer))
-    return decision.model_dump(mode="json")
+    return await _decision_out(_customer(offer.customer_id), offer, body.selections)
 
 
 # ----------------------------------------------------------------------------- orders & approvals
@@ -464,7 +546,7 @@ def place_order(body: OrderIn, who: Principal = Depends(buyer)):
     if used:
         raise HTTPException(409, f"Offer {offer.id} was already used for order {used.id}")
     now = datetime.now(TZ)
-    decision, lines = evaluate(customer, offer, body.selections, now, verify_offer(offer, S.signer))
+    decision, lines = evaluate(customer, offer, body.selections, now, verify_offer(offer, S.signer), _purchase_history(customer.id))
     approver = None
     if decision.outcome == "needs_approval":
         if not body.approved_by.strip():
@@ -565,17 +647,56 @@ def _mean(values: list[float]) -> float | None:
     return round(statistics.fmean(values), 3) if values else None
 
 
+@app.get("/api/catalog/departments", tags=["catalog"])
+def catalog_departments(who: Principal = Depends(signed_in)):
+    """The assortment in a few top-level groups, each with its departments: product and product-type counts,
+    average carbon footprint and delivery reliability. Aggregates only."""
+    _need_catalog()
+    by_dept: dict[str, list[dict]] = defaultdict(list)
+    for p in S.catalog.products:
+        by_dept[department_of(p.get("category"))].append(p)
+
+    def summary(ident: str, name: str, ps: list[dict]) -> dict:
+        return {
+            "id": ident, "name": name, "products": len(ps),
+            "types": len({p.get("category") for p in ps}),
+            "avg_co2": _mean([p["co2"] for p in ps if p.get("co2") is not None]),
+            "avg_reliability": _mean([p["reliability"] for p in ps if p.get("reliability") is not None]),
+        }
+
+    groups = []
+    for gid, gname, dept_ids in DEPARTMENT_GROUPS:
+        depts = [summary(d, DEPARTMENT_NAMES[d], by_dept[d]) for d in dept_ids if by_dept.get(d)]
+        if depts:
+            groups.append({**summary(gid, gname, [p for d in dept_ids for p in by_dept.get(d, [])]), "departments": depts})
+    return groups
+
+
 @app.get("/api/catalog/search", tags=["catalog"])
 def catalog_search(
     who: Principal = Depends(signed_in),
-    q: str = Query(min_length=2, max_length=80),
+    q: str = Query(default="", max_length=80),
     filters: str = Query(default="", description="comma-separated, e.g. claim:VEGAN,origin:fi"),
     category: str = "",
+    department: str = Query(default="", description="a group or department id from /api/catalog/departments"),
 ):
-    """Explore the assortment using aggregate metrics only; product-level data is not exposed here."""
+    """Explore the assortment using aggregate metrics only; product-level data is not exposed here.
+    Browse a group or a department, search by words, or both (a search within a department)."""
     _need_catalog()
-    phrases = rules_parser.query_phrases(q)
-    matches = [p for p, _ in S.catalog.search(phrases, limit=800)]
+    q = q.strip()
+    if department and department not in DEPARTMENT_NAMES and department not in GROUP_DEPARTMENTS:
+        raise HTTPException(400, f"Unknown department {department}")
+    wanted = GROUP_DEPARTMENTS.get(department, {department})
+    if q and len(q) < 2:
+        raise HTTPException(400, "Type at least two letters")
+    if not q and not department:
+        raise HTTPException(400, "Choose a department or type at least two letters")
+    if q:
+        matches = [p for p, _ in S.catalog.search(rules_parser.query_phrases(q), limit=800)]
+    else:
+        matches = S.catalog.products
+    if department:
+        matches = [p for p in matches if department_of(p.get("category")) in wanted]
     active = [f for f in filters.split(",") if f.strip()]
     filtered = [p for p in matches if all(_passes(p, f) for f in active)]
     facets = [
@@ -589,7 +710,7 @@ def catalog_search(
     for cat, ps in groups_map.items():
         co2 = [p["co2"] for p in ps if p.get("co2") is not None]
         rel = [p["reliability"] for p in ps if p.get("reliability") is not None]
-        groups.append({"category": cat, "count": len(ps), "co2": _mean(co2), "reliability": _mean(rel)})
+        groups.append({"category": cat, "name": category_name(cat), "count": len(ps), "co2": _mean(co2), "reliability": _mean(rel)})
     groups.sort(key=lambda g: (g["co2"] is None, -(g["co2"] or 0)))
     if category:
         filtered = [p for p in filtered if p.get("category") == category]

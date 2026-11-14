@@ -9,6 +9,7 @@ Severity says what a failed check means:
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import datetime
 
 from contracts.models import Candidate, Check, Constraints, Customer, Decision, Offer, OrderLine
@@ -17,6 +18,13 @@ from contracts.vocab import ALLERGENS, CLAIMS, FINNISH_LABELS, LABELS, SALES_UNI
 RELIABILITY_REVIEW_BELOW = 0.80
 RELIABILITY_NOTE_BELOW = 0.95
 UNUSUAL_ORDER_FACTOR = 3.0
+
+
+@dataclass(frozen=True)
+class PurchaseHistory:
+    """What the customer has bought before (delivered or placed orders, cancelled ones left out)."""
+    known_products: frozenset[str]  # product ids it has ordered
+    largest_order: float | None  # its largest order total so far, EUR excl. VAT
 
 
 def eur(value: float) -> str:
@@ -110,6 +118,7 @@ def evaluate(
     selections: dict[int, str],
     now: datetime,
     integrity_ok: bool,
+    history: PurchaseHistory | None = None,
 ) -> tuple[Decision, list[OrderLine]]:
     checks: list[Check] = []
 
@@ -227,6 +236,17 @@ def evaluate(
         elif rel is not None and rel < RELIABILITY_NOTE_BELOW:
             add("RELIABILITY", False, "info", f"{short}: delivery reliability {rel:.0%} (some orders arrived short)")
 
+        # a product the customer has never bought, costing more than its average order, needs a person
+        avg_order = customer.avg_order_value
+        if history is not None and cand.product_id not in history.known_products:
+            if avg_order and cand.line_total > avg_order:
+                add("NEW_PRODUCT", False, "review",
+                    f"{short} is new for {customer.name} and costs {eur(cand.line_total)}, more than its average order ({eur(avg_order)})")
+            else:
+                add("NEW_PRODUCT", True, "review",
+                    f"{short} is new for {customer.name}; its cost stays within the average order"
+                    + (f" ({eur(avg_order)})" if avg_order else ""))
+
         lines.append(
             OrderLine(
                 item_index=idx,
@@ -274,6 +294,13 @@ def evaluate(
         add("ORDER_SIZE", False, "review", f"{total / avg:.1f}× this customer's average order ({eur(avg)})")
     elif avg:
         add("ORDER_SIZE", True, "review", f"Order size is in line with this customer's history (average {eur(avg)})")
+
+    # more than the customer has ever spent on one order needs a person
+    if history is not None and history.largest_order:
+        add("ORDER_MAX", total <= history.largest_order, "review",
+            f"Total {eur(total)} is within the largest order so far ({eur(history.largest_order)})"
+            if total <= history.largest_order
+            else f"Total {eur(total)} is more than {customer.name}'s largest order so far ({eur(history.largest_order)})")
 
     blocking = [c for c in checks if not c.passed and c.severity == "block"]
     review = [c for c in checks if not c.passed and c.severity == "review"]

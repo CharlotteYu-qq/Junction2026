@@ -100,6 +100,15 @@ Rules:
 - The input may be a conversation between the buyer and you, the ordering agent. Combine everything
   the buyer said: later messages complete or correct earlier ones ("200 litres" answers "how much
   milk?"). If the buyer confirmed an amount you estimated, it is no longer estimated.
+- If a "Current order" is given, the latest buyer message changes it: add a product ("also 10 kg
+  butter"), remove one ("remove the cream", "no more butter"), change an amount ("make the milk 300
+  litres"; "10 kg more butter" adds to the current amount), or change the day, budget or
+  substitution rule. Return the whole order after the change, keeping everything the buyer did not
+  change exactly as it is in the current order (products, amounts, requirements, day). A stated
+  delivery day in the current order counts as stated.
+- "The usual", "the usual milk" or "same as last time": the buyer's purchase history is applied
+  after you, so return the product they named with quantity_known false (no item if they named
+  none), and do not ask about it. Once the current order has an amount for it, keep that amount.
 - follow_up_question: if any item has no quantity or unit, an amount is only estimated, no delivery
   date was stated, or something needs clarification, write one short, friendly question in the
   buyer's language that asks for every missing detail at once, including the delivery day when none
@@ -114,9 +123,12 @@ async def parse(text: str, today: date, model: str) -> ParsedRequest:
 
 async def parse_dialogue(
     turns: list[tuple[str, str]], today: date, model: str, meta: dict | None = None,
+    current: ParsedRequest | None = None,
 ) -> tuple[ParsedRequest, str]:
     """A conversation [("buyer" | "agent", text), ...] -> (order lines so far, suggested follow-up question).
 
+    `current` is what the agent understood after the previous turn (the order being discussed), so a
+    message like "add 10 kg butter" changes that order instead of starting a new one.
     If `meta` is given, the served model, token usage and stop reason are recorded in it (for evals).
     """
     import anthropic  # optional dependency
@@ -127,6 +139,8 @@ async def parse_dialogue(
     else:
         content = "Conversation so far:\n" + "\n".join(
             f"{'Buyer' if role == 'buyer' else 'Agent'}: {text}" for role, text in turns)
+        if current is not None and current.items:
+            content = f"Current order:\n{json.dumps(current_order(current), ensure_ascii=False)}\n\n{content}"
 
     client = anthropic.AsyncAnthropic()
     fallback = (
@@ -167,21 +181,41 @@ async def parse_dialogue(
     parsed.substitution_allowed = parsed.substitution_allowed and substitutions
     parsed.clarification_required = parsed.clarification_required or clarification
     parsed.warnings.extend(notes)
-    check_amounts(parsed, buyer_text, today)
+    check_amounts(parsed, buyer_text, today, current)
     return parsed, str(data.get("follow_up_question") or "")
 
 
-def check_amounts(parsed: ParsedRequest, buyer_text: str, today: date) -> None:
+def current_order(parsed: ParsedRequest) -> dict:
+    """The order being discussed, compactly, for the model to change."""
+    return {
+        "items": [{
+            "product_query": it.product_query, "quantity": it.quantity, "unit": it.unit or "UNKNOWN",
+            "required_claims": it.constraints.required_claims, "free_from_allergens": it.constraints.free_from_allergens,
+            "required_labels": it.constraints.required_labels, "origin_country": it.constraints.origin_country or "",
+            **({"assumption": it.assumption} if it.assumption else {}),
+        } for it in parsed.items],
+        "delivery_date": parsed.delivery_date.isoformat(), "delivery_date_stated": not parsed.delivery_date_assumed,
+        "budget_eur": parsed.budget_eur, "substitution_allowed": parsed.substitution_allowed,
+    }
+
+
+def check_amounts(parsed: ParsedRequest, buyer_text: str, today: date, current: ParsedRequest | None = None) -> None:
     """Deterministic guard on amounts. An amount written with a unit ("500 g") is unambiguous, so when the
     model reads it differently (500 kg) it is corrected if only one item uses that unit, and otherwise the
-    buyer has to confirm it (the assumption makes the agent ask)."""
+    buyer has to confirm it (the assumption makes the agent ask). Amounts already in the current order,
+    and a stated amount added to or taken from one ("10 kg more butter"), are as written too."""
     from agent.rules_parser import stated_amounts
 
     amounts = stated_amounts(buyer_text, today)
+    known = [(it.quantity, it.unit) for it in (current.items if current else []) if it.quantity is not None]
     for it in parsed.items:
         if it.quantity is None or it.unit is None or it.assumption:
             continue
-        written = [q for q, u in amounts if u == it.unit]
+        before = [q for q, u in known if u == it.unit]
+        stated = [q for q, u in amounts if u == it.unit]
+        if any(math.isclose(it.quantity, b + s * sign, rel_tol=0.01) for b in before for s in [0.0, *stated] for sign in (1, -1)):
+            continue
+        written = stated
         if not written or any(math.isclose(q, it.quantity, rel_tol=0.01) for q in written):
             continue
         if len(written) == 1 and sum(1 for x in parsed.items if x.unit == it.unit) == 1:
