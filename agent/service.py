@@ -5,7 +5,7 @@ import importlib.util
 import time
 from datetime import date
 
-from agent import rules_parser
+from agent import dialogue, rules_parser
 from contracts.models import ParsedRequest
 
 
@@ -28,3 +28,31 @@ async def parse_request(text: str, today: date, *, api_key: str, mode: str, mode
             parsed.warnings.insert(0, f"Claude parser unavailable ({type(e).__name__}: {str(e)[:120]}): used the rule-based parser")
             return parsed, int((time.perf_counter() - t) * 1000)
     return rules_parser.parse(text, today), int((time.perf_counter() - t) * 1000)
+
+
+async def parse_conversation(
+    turns: list[tuple[str, str]], previous: ParsedRequest | None, today: date, *, api_key: str, mode: str, model: str,
+) -> tuple[ParsedRequest, str, int]:
+    """Understand a conversation with the buyer. Returns (what was understood, follow-up question or "", ms).
+
+    Claude reads the whole conversation. The rule-based fallback merges the latest answer into what the
+    agent understood after the previous turn. Either way, dialogue.py decides whether a question is needed.
+    """
+    t = time.perf_counter()
+    buyer = [text for role, text in turns if role == "buyer"]
+    parsed, suggested, note = None, "", ""
+    if claude_available(api_key, mode):
+        from agent import claude_parser
+
+        try:
+            parsed, suggested = await claude_parser.parse_dialogue(turns, today, model)
+        except Exception as e:  # never let the LLM path break ordering
+            note = f"Claude parser unavailable ({type(e).__name__}: {str(e)[:120]}): used the rule-based parser"
+    if parsed is None:
+        if previous is not None and len(buyer) > 1:
+            parsed = dialogue.merge_answer(previous, buyer[-1], today)
+        else:
+            parsed = rules_parser.parse("\n".join(buyer), today)
+        if note:
+            parsed.warnings.insert(0, note)
+    return parsed, dialogue.follow_up_question(parsed, suggested), int((time.perf_counter() - t) * 1000)

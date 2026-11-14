@@ -1,6 +1,6 @@
 # Aimo Agent Gateway *(working title)*
 
-> **Junction 2026 · Valio Aimo challenge.** Our goal is to let autonomous purchasing agents find products, compare offers and place orders with a food-service wholesaler in minutes, while keeping real systems, confidential data and humans' authority protected.
+> **Junction 2026 · Valio Aimo challenge.** Our goal is to let a professional kitchen order from a food-service wholesaler by talking to an AI agent: it asks for what's missing, finds and compares products and places the order in minutes, while real systems, confidential data and people's authority stay protected.
 
 📋 **Progress tracker: [PLAN.md](PLAN.md)** · 🔌 **API notes: [docs/mock-api-notes.md](docs/mock-api-notes.md)**
 
@@ -34,42 +34,43 @@ Sign in as a buyer and use the example buttons on the Order page for the demo sc
 
 ## The problem
 
-Today, professional kitchens order from Valio Aimo by logging into a webshop and clicking through a catalog. Soon the buyer's own AI agent will do that work. It will find products, compare them, order them and handle exceptions on the buyer's behalf.
+Today, professional kitchens order from Valio Aimo by logging into a webshop and clicking through a catalog. An AI agent can do most of that work: understand a need written in plain words, ask for what is missing, find and compare products, place the order and handle exceptions.
 
-For that to work, Valio Aimo needs an interface that an external agent can use to:
+For that to work, the agent needs an interface through which it can:
 
 1. **Look up** products, prices and availability in a structured way.
 2. **Move from inquiry to a firm order** at fixed prices, with no negotiation.
-3. **Stay inside its authority.** The agent decides some things on its own, and the rest goes to a human for sign-off.
+3. **Stay inside its authority.** The agent decides some things on its own, and the rest goes to a person at Valio Aimo for sign-off.
 
 All of this must work without exposing internal systems, confidential data or the marketplace roadmap. It should also be built on open, verifiable standards, so that the interface is not defined by someone else's platform.
 
 ## Our approach
 
-We build a **gateway** between external purchasing agents and Valio Aimo's backend (the challenge provides a mock of it). Agents never talk to the backend directly. They only use a small interface that is documented and that they can verify.
+We build an **ordering agent** into a **gateway** that Valio Aimo runs in front of its backend (the challenge provides a mock of it). Every customer talks to the agent in plain words, as a conversation: when the quantity, unit or delivery day is missing, the agent asks before it checks prices and stock. The agent never talks to the backend directly. It only uses a small, documented interface, and every order passes the same guardrails. The same interface is open to other clients, so a customer's own system or agent could use it later.
 
 | # | Idea | What it gives |
 |---|------|---------------|
-| 1 | **One agent interface, two transports.** The same set of tools is offered as an **MCP server** (for LLM agents) and as **REST/OpenAPI** (for any other client). | Open standards, no lock-in to one platform |
+| 1 | **One interface, two transports.** The tools the agent uses are offered as **REST/OpenAPI** today and as an **MCP server** next, so other clients get the same rules. | Open standards, no lock-in to one platform |
 | 2 | **Signed offers that expire** *(trust protocol)*. Every price and availability answer is an offer with an `offer_id`, a validity window, its data source and timestamp, and a gateway signature (Ed25519). An order points to an offer. | An agent can check claims without a manual step, and prices are fixed |
-| 3 | **Mandates and a policy engine** *(guardrails)*. The buyer organisation gives each agent a mandate a machine can read: spend limits, allowed categories, required labels, allergen rules and how far substitutes may differ. Each order is checked against it and gets one of three results: `auto_approve`, `needs_approval` (with reasons) or `reject`. | Clear lines between what the agent decides alone and what a human signs off |
+| 3 | **Customer limits and a policy engine** *(guardrails)*. Valio Aimo decides which customers are trusted and up to which total their orders may be placed automatically; customers' hard rules (such as allergens) always apply. Each order is checked and gets one of three results: `auto_approve`, `needs_approval` (with reasons) or `reject`. | Clear lines between what the agent decides alone and what a person at Valio Aimo signs off |
 | 4 | **An audit trail people can read**. Every step (search, offer, decision, approval, order) is added to a log where each entry is chained to the previous one by its hash. Each entry includes the agent's stated reason. The log is shown as a timeline to the buyer and to Valio Aimo. | Traceability and explanations, and trust on both sides |
 
 ## Architecture
 
 ```
 ┌──────────────────────────────┐        ┌──────────────────────────────┐
-│ Buyer's purchasing agent     │        │ Human approver (buyer side)  │
-│ LLM + tools        (agent/)  │        │ Approval & audit UI   (ui/)  │
+│ Buyer (a kitchen)            │        │ Valio Aimo staff             │
+│ Buyer portal: chat   (ui/)   │        │ Review & admin UI    (ui/)   │
 └──────────────┬───────────────┘        └──────────────┬───────────────┘
-               │ MCP / REST + agent credential         │ REST
+               │ REST (buyer session)                  │ REST (staff session)
                ▼                                       ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│ Aimo Agent Gateway                                                   │
-│  gateway/  agent interface · catalog search · offers · orders        │
-│  trust/    mandates · policy engine · approvals · signing · audit    │
+│ Aimo Agent Gateway, run by Valio Aimo                                │
+│  agent/    ordering agent: understands, asks what's missing          │
+│  gateway/  agent tools · catalog search · offers · orders            │
+│  trust/    sign-in · policy engine · approvals · signing · audit     │
 └──────────────────────────────┬───────────────────────────────────────┘
-                               │ server-side API key (never exposed to agents)
+                               │ server-side API key (never leaves the gateway)
                                ▼
         Valio Aimo mock backend (catalog, prices, stock, lead times,
         certificates & sustainability labels) — provided by the challenge
@@ -77,37 +78,37 @@ We build a **gateway** between external purchasing agents and Valio Aimo's backe
 
 ### Core flow: from request to order
 
-*Example request: "I need 1,000 litres of lactose-free milk by Monday. Find an option that meets our requirements based on price and availability."*
+*Example conversation: "I need lactose-free milk." → agent: "How much, and for which day?" → "1,000 litres, Monday."*
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant A as Buyer agent
-    participant G as Agent Gateway
+    participant U as Buyer (kitchen)
+    participant A as Ordering agent
+    participant G as Gateway tools
     participant P as Policy engine
-    participant H as Human approver
+    participant H as Valio Aimo staff
     participant B as Valio Aimo backend (mock)
-    A->>G: get_mandate()
-    A->>G: search_products("lactose-free milk")
-    G->>B: catalog query
-    G-->>A: products, labels, pack sizes
-    A->>G: request_offer(lines, deliver_by = Monday)
+    U->>A: "I need lactose-free milk"
+    A-->>U: "How much, and for which day?"
+    U->>A: "1,000 litres, Monday"
+    A->>G: search catalog (lactose-free milk)
+    A->>G: price & availability for the shortlist
     G->>B: price & stock lookup
-    G-->>A: signed offer (fixed prices, valid until T)
-    A->>G: place_order(offer_id, rationale)
-    G->>P: evaluate(order, mandate)
-    alt within mandate
+    G-->>U: signed offer (fixed prices, valid until T) + ranked options
+    U->>G: place order (offer_id, rationale)
+    G->>P: evaluate(order, customer limits)
+    alt within the customer's limit
         P-->>G: auto_approve
-        G->>B: create order
-        G-->>A: placed
-    else over limit or substitution outside preferences
+        G-->>U: placed
+    else over the limit, new customer or substitute
         P-->>G: needs_approval(reasons)
-        G-->>A: pending_approval
-        H->>G: approve
-        G->>B: create order
+        G-->>U: waiting for Valio Aimo
+        H->>G: approve (named staff member)
+        G-->>U: placed
     else hard rule violated (e.g. allergen)
         P-->>G: reject(reason)
-        G-->>A: rejected + reason
+        G-->>U: not placed + reason
     end
     Note over G: every step is written to the hash-chained audit log
 ```
@@ -119,25 +120,27 @@ The data models live in [contracts/models.py](contracts/models.py).
 | Endpoint | Purpose |
 |---|---|
 | `GET /.well-known/aimo-agent-gateway.json` | Discovery for agents: flow, offer-signing public key, data boundary |
+| `POST /api/session/login` | Sign in to the buyer portal (as one customer) or the Valio Aimo admin |
+| `POST /api/chat` | Talk to the ordering agent: a question while details are missing, then a **signed fixed-price offer** + policy preview |
 | `POST /api/requests` | Natural-language need → parsed intent → catalog search → Valio price & availability → **signed fixed-price offer** + policy preview |
 | `POST /api/offers/{id}/evaluate` | Preview the decision for a different selection (nothing is placed) |
 | `POST /api/orders` | Commit an offer → `placed` / `pending_approval` / `rejected`, with every check explained |
-| `POST /api/orders/{id}/decision` | A person approves or rejects, and can verify a new customer |
+| `POST /api/orders/{id}/decision` | Valio Aimo staff approve or reject, and can verify a new customer |
 | `GET /api/audit` | The hash-chained, readable audit trail and the chain verification |
 | `GET /api/catalog/search`, `POST /api/catalog/quote` | Explore static data; live price and stock only for hand-picked products |
 | `GET/POST /api/customers` | Whitelist / trust registry |
 
-Next step: expose the same operations as **MCP tools**, so LLM agents can call them directly.
+Next step: expose the same operations as **MCP tools**, so other clients and agents can call them directly.
 
 ## Guardrails model (implemented in [trust/policy.py](trust/policy.py))
 
 | Situation | Decision |
 |---|---|
 | Customer on the whitelist, total within its auto-approval limit, everything available on time and matching the request | ✅ Placed automatically |
-| New customer (not on the whitelist) | 🧑 Person approves, and can verify the customer at the same time |
-| Total above the auto-approval limit, or more than 3× the customer's average order | 🧑 Person approves |
+| New customer (not on the whitelist) | 🧑 Valio Aimo approves, and can verify the customer at the same time |
+| Total above the auto-approval limit, or more than 3× the customer's average order | 🧑 Valio Aimo approves |
 | Not enough stock, a later delivery date, or the order cut-off has passed | ⛔ Revise the quantity/date and request a new offer |
-| Substitute outside preferences | 🧑 Person approves only when substitution is permitted; requested allergen exclusions remain hard rules |
+| Substitute outside preferences | 🧑 Valio Aimo approves only when substitution is permitted; requested allergen exclusions remain hard rules |
 | Missing explicit evidence for a requested or strict allergen exclusion | ⛔ Blocked until evidence is obtained and a new offer is evaluated |
 | Product contains or may contain an allergen the customer never accepts | ⛔ Excluded / rejected (hard rule) |
 | Offer expired or signature mismatch | ⛔ Rejected, including when approval is attempted |
@@ -153,7 +156,7 @@ The gateway exposes only selected data. It never exposes purchase prices, margin
 ├── contracts/   shared data models & vocabulary  (everyone, changes via PR)
 ├── gateway/     FastAPI app, catalog search, Valio API client, offer planner, orders   — Member A
 ├── trust/       whitelist, policy engine, signing, hash-chained audit log               — Member B
-├── agent/       natural language → structured intent (rules + optional Claude)          — Member C
+├── agent/       ordering agent: understands requests, asks follow-up questions          — Member C
 ├── ui/          web UI: plain HTML/CSS/JS, no build step                                — Member C
 ├── scripts/     download_data.py
 ├── docs/        mock-API notes, decisions, pitch material
@@ -165,7 +168,7 @@ The gateway exposes only selected data. It never exposes purchase prices, margin
 - **Backend:** Python 3.12, FastAPI, Pydantic v2. The models in `contracts/` also give us the OpenAPI spec.
 - **Storage:** JSON files in `data/runtime/` (to be replaced by SQLite).
 - **Trust:** Ed25519-signed offers (the `cryptography` package), public key at `/.well-known/`, and a SHA-256 hash-chained audit log.
-- **Language understanding:** a rule-based parser (English + basic Finnish) that always works. If `ANTHROPIC_API_KEY` is set, the Claude parser (`claude-opus-5-5`, structured outputs) is used instead, falling back to the rules.
+- **Ordering agent:** Claude (model from `CLAUDE_MODEL`; the demo uses `claude-haiku-5-5`, with structured outputs) reads the conversation and phrases follow-up questions in the buyer's language. Whether a question is needed is decided in code ([agent/dialogue.py](agent/dialogue.py)). Without `ANTHROPIC_API_KEY`, a rule-based parser (English + basic Finnish) does the same and always works.
 - **UI:** vanilla JS modules, no build step. Colours follow the Valio Aimo portal theme.
 - **Next:** an MCP server over the same operations, SQLite, and a PRH/YTJ business-ID lookup.
 

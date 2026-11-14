@@ -6,6 +6,8 @@ const S = {
   session: null, // { signed_in, role: 'buyer' | 'valio', name, customer_id, password_required, customers }
   vocab: { claims: {}, allergens: {}, labels: {}, sales_units: {}, requirement_options: [] },
   customers: [],
+  chat: { messages: [], understood: null }, // the conversation with the agent: { role: 'buyer' | 'agent', text }
+  detailsOpen: false, // the buyer opened "what the agent understood / how it worked"
   offer: null,
   decision: null,
   edit: null,
@@ -144,7 +146,7 @@ function orderStateMessage() {
   if (S.submissionPending) return 'Submitting this order…';
   if (S.requestPending) return 'Checking the request. The previous offer cannot be submitted.';
   if (S.dirty) return S.requestChanged
-    ? 'The request or customer changed. Find a new option before ordering.'
+    ? 'You are changing the request. Send it to the agent before ordering.'
     : 'Details changed. Re-run with these details before ordering.';
   if (S.evaluationPending) return 'Checking the selected option. Wait before ordering.';
   if (S.evaluationError) return 'The selected option could not be checked. Select an option again to retry.';
@@ -210,20 +212,51 @@ function renderExamples() {
     ...shown.map((ex) => h('button', {
       type: 'button', class: 'example', text: ex.label,
       onClick: () => {
+        newRequest({ focus: false }); // an example starts a new conversation
         $('#request-text').value = ex.text;
-        markDirty(true);
-        runRequest();
+        sendMessage();
       },
     })));
 }
 
-async function runRequest(override = null) {
-  if (S.requestPending || S.submissionPending) return;
-  const text = $('#request-text').value.trim();
-  if (!text) { setStatus('Write what you need first.', true); $('#request-text').focus(); return; }
-  const customerId = S.session.customer_id;
-  const version = ++S.requestVersion;
-  const editVersion = S.editVersion;
+// ---------------------------------------------------------------------- conversation with the agent
+// The buyer and the agent talk until the request is complete: the agent asks for a missing quantity,
+// unit or delivery date (or an unclear condition) before it checks prices and stock with Valio Aimo.
+function renderThread() {
+  const msgs = S.chat.messages;
+  const last = msgs[msgs.length - 1];
+  const waiting = last?.role === 'agent' && last.question;
+  $('#chat-thread').hidden = msgs.length === 0;
+  $('#chat-thread').replaceChildren(...msgs.map((m) => h('div', { class: `chat-msg chat-${m.role}` },
+    h('span', { class: 'chat-who', text: m.role === 'buyer' ? (currentCustomer()?.name || 'You') : 'Ordering agent' }),
+    h('p', { text: m.text }),
+    m === last && waiting ? h('button', {
+      type: 'button', class: 'link-button chat-skip', text: 'Show options with what you know so far',
+      disabled: S.requestPending, onClick: () => sendMessage({ skip: true }),
+    }) : null)));
+  $('#request-label').textContent = waiting ? 'Your answer' : msgs.length ? 'Anything to change or add?' : 'Your request';
+  $('#request-text').placeholder = waiting ? 'e.g. 200 litres, delivered on Friday' : 'e.g. I need 1,000 litres of lactose-free milk by Monday';
+  $('#run-btn').textContent = msgs.length ? 'Send' : 'Find the best option';
+}
+
+function offerSummary(offer) {
+  const p = offer.parsed;
+  const items = p.items.map((it) => itemTitle(it)).join('; ') || 'no products recognised';
+  return `Got it: ${items}, delivery ${fmt.day(p.delivery_date)}. I checked prices and availability with Valio Aimo: the options are below.`;
+}
+
+function showOffer(res, { scroll = true } = {}) {
+  Object.assign(S, { offer: res.offer, decision: res.decision, selections: {}, sort: {}, expanded: {}, rationale: null, submitted: null, dirty: false, requestChanged: false });
+  S.edit = structuredClone(res.offer.parsed);
+  S.chat.understood = res.offer.parsed;
+  const idx = S.customers.findIndex((c) => c.id === res.customer.id);
+  if (idx >= 0) S.customers[idx] = res.customer;
+  setStatus('');
+  renderResults();
+  if (scroll) $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function startPending(message) {
   S.requestPending = true;
   S.dirty = true;
   S.evaluationVersion += 1;
@@ -233,30 +266,72 @@ async function runRequest(override = null) {
   updateOrderControls();
   if (S.offer) rerenderDecision();
   $('#results').classList.add('is-refreshing');
-  setStatus(override ? 'Re-checking with your corrections…' : 'Understanding the request and checking prices and availability with Valio Aimo…');
+  setStatus(message);
+}
+
+function endPending(version) {
+  if (version !== S.requestVersion) return;
+  S.requestPending = false;
+  $('#results').classList.remove('is-refreshing');
+  if (S.offer) rerenderDecision();
+  renderThread();
+  updateOrderControls();
+}
+
+async function sendMessage({ skip = false } = {}) {
+  if (S.requestPending || S.submissionPending) return;
+  const text = $('#request-text').value.trim();
+  if (!skip) {
+    if (!text) { setStatus('Write what you need first.', true); $('#request-text').focus(); return; }
+    S.chat.messages.push({ role: 'buyer', text });
+    $('#request-text').value = '';
+  }
+  const version = ++S.requestVersion;
+  startPending(skip ? 'Checking prices and availability with what the agent knows so far…' : 'The agent is reading your message…');
+  renderThread();
   try {
-    const res = await api('/api/requests', { method: 'POST', body: { customer_id: customerId, text, override } });
+    const res = await api('/api/chat', {
+      method: 'POST',
+      body: { messages: S.chat.messages.map(({ role, text: t }) => ({ role, text: t })), understood: S.chat.understood, skip_questions: skip },
+    });
     if (version !== S.requestVersion) return;
-    if (editVersion !== S.editVersion || text !== $('#request-text').value.trim()) {
-      setStatus('The request changed while it was being checked. Find a new option.', true);
+    if (res.kind === 'question') {
+      S.chat.understood = res.understood;
+      S.chat.messages.push({ role: 'agent', text: res.question, question: true });
+      setStatus('');
       return;
     }
-    Object.assign(S, { offer: res.offer, decision: res.decision, selections: {}, sort: {}, expanded: {}, rationale: null, submitted: null, dirty: false, requestChanged: false });
-    S.edit = structuredClone(res.offer.parsed);
-    const idx = S.customers.findIndex((c) => c.id === res.customer.id);
-    if (idx >= 0) S.customers[idx] = res.customer;
-    setStatus('');
-    renderResults();
-    if (!override) $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showOffer(res);
+    S.chat.messages.push({ role: 'agent', text: offerSummary(res.offer) });
+  } catch (e) {
+    if (version !== S.requestVersion) return;
+    setStatus(e.message, true);
+    if (!skip) { S.chat.messages.pop(); $('#request-text').value = text; } // let the buyer send it again
+  } finally {
+    endPending(version);
+    if (version === S.requestVersion && !S.requestPending) $('#request-text').focus({ preventScroll: true });
+  }
+}
+
+// Re-run with the person's corrections from "What the agent understood" (no new message).
+async function runRequest(override) {
+  if (S.requestPending || S.submissionPending || !S.offer) return;
+  const text = S.chat.messages.filter((m) => m.role === 'buyer').map((m) => m.text).join(' · ') || S.offer.request_text;
+  const version = ++S.requestVersion;
+  const editVersion = S.editVersion;
+  startPending('Re-checking with your corrections…');
+  try {
+    const res = await api('/api/requests', { method: 'POST', body: { customer_id: S.session.customer_id, text, override } });
+    if (version !== S.requestVersion) return;
+    if (editVersion !== S.editVersion) {
+      setStatus('The details changed while they were being checked. Re-run with these details.', true);
+      return;
+    }
+    showOffer(res, { scroll: false });
   } catch (e) {
     if (version === S.requestVersion) setStatus(e.message, true);
   } finally {
-    if (version === S.requestVersion) {
-      S.requestPending = false;
-      $('#results').classList.remove('is-refreshing');
-      if (S.offer) rerenderDecision();
-      updateOrderControls();
-    }
+    endPending(version);
   }
 }
 
@@ -267,8 +342,22 @@ function renderResults() {
   const host = $('#results');
   host.hidden = false;
   host.replaceChildren(h('div', { class: 'results-grid' },
-    h('div', { class: 'results-main' }, understoodPanel(), operationsPanel(), S.offer.items.map((item, i) => itemPanel(item, i))),
+    h('div', { class: 'results-main' }, agentDetails(), S.offer.items.map((item, i) => itemPanel(item, i))),
     h('aside', { class: 'results-side', 'aria-label': 'Decision' }, decisionPanel())));
+}
+
+// ---------------------------------------------------------------------- agent details (collapsed)
+// What the agent understood and the steps it ran are kept out of the buyer's way. They open by
+// themselves when the request still needs a correction (e.g. the buyer skipped the agent's question).
+function agentDetails() {
+  const p = S.offer.parsed;
+  const needsFix = p.delivery_date_assumed || p.clarification_required
+    || p.items.some((it) => it.quantity == null || !it.unit || it.assumption);
+  const details = h('details', { class: 'agent-details', id: 'agent-details', open: needsFix || S.detailsOpen },
+    h('summary', { text: needsFix ? 'Check what the agent understood: something is still missing' : 'Details: what the agent understood and how it worked' }),
+    understoodPanel(), operationsPanel());
+  details.addEventListener('toggle', () => { if (!needsFix) S.detailsOpen = details.open; });
+  return details;
 }
 
 // ---------------------------------------------------------------------- understood (editable)
@@ -683,19 +772,22 @@ async function submitOrder(rationale) {
   }
 }
 
-function newRequest() {
+function newRequest({ focus = true } = {}) {
   if (S.submissionPending) return;
   S.requestVersion += 1;
   S.evaluationVersion += 1;
   Object.assign(S, { offer: null, decision: null, edit: null, submitted: null, selections: {}, sort: {}, rationale: null, dirty: false, requestChanged: false, requestPending: false, evaluationPending: false, evaluationError: null, submitError: null });
+  S.chat = { messages: [], understood: null };
   $('#results').hidden = true;
+  $('#results').classList.remove('is-refreshing');
   $('#results').replaceChildren();
   $('#request-text').value = '';
   renderCustomer();
+  renderThread();
   setStatus('');
   updateOrderControls();
   window.scrollTo({ top: 0, behavior: 'smooth' });
-  $('#request-text').focus();
+  if (focus) $('#request-text').focus();
 }
 
 // ====================================================================== review page
@@ -1116,8 +1208,8 @@ async function init() {
     renderCustomer();
     renderExamples();
     $('#request-text').addEventListener('input', () => markDirty(true));
-    $('#request-form').addEventListener('submit', (e) => { e.preventDefault(); runRequest(); });
-    $('#request-text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runRequest(); });
+    $('#request-form').addEventListener('submit', (e) => { e.preventDefault(); sendMessage(); });
+    $('#request-text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendMessage(); });
     updateOrderControls();
   } else {
     initRegisterForm();
