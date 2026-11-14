@@ -15,10 +15,11 @@
 <body>
   <header class="site-header">
     <div class="container header-inner">
-      <a class="brand" href="#" aria-label="Aimo home">
+      <a class="brand" href="#home" aria-label="Aimo home">
         <span class="brand-word">Aimo</span>
       </a>
       <nav class="main-nav" aria-label="Main" hidden>
+        <a href="#home" data-page="home" data-roles="buyer">Home</a>
         <a href="#order" data-page="order" data-roles="buyer">Order</a>
         <a href="#orders" data-page="orders" data-roles="buyer">My orders</a>
         <a href="#explore" data-page="explore" data-roles="buyer">Explore</a>
@@ -32,15 +33,15 @@
 
   <main>
 
-    <!-- ======================================================= SIGN IN -->
-    <section id="page-signin" class="page" hidden>
+    <!-- ======================================================= HOME (sign-in when signed out, shortcuts when signed in) -->
+    <section id="page-home" class="page" hidden>
       <section class="home-intro" aria-labelledby="home-title">
         <div class="container home-intro-grid">
           <div class="home-intro-copy">
             <p class="eyebrow">Valio Aimo · foodservice ordering</p>
             <h1 id="home-title">A simpler way to order for your kitchen.</h1>
             <p class="lead">Tell the agent what your kitchen needs. It finds suitable products, checks prices and availability, and keeps you in control.</p>
-            <a class="btn btn-primary" href="#signin-buyer">Get started</a>
+            <a class="btn btn-primary" id="home-cta" href="#signin-buyer">Get started</a>
           </div>
           <div class="home-video-column">
             <div class="video-embed-placeholder" role="group" aria-label="Introduction video placeholder">
@@ -48,7 +49,7 @@
               <strong>Introduction video</strong>
               <span class="muted small">Add your video embed here</span>
             </div>
-            <a class="scroll-cue" href="#signin-buyer">
+            <a class="scroll-cue" href="#get-started">
               <span><strong>There's more below</strong><br>Scroll down to get started</span>
               <span class="scroll-cue-arrow" aria-hidden="true">↓</span>
             </a>
@@ -91,6 +92,19 @@
               <p class="signin-error bad small" role="alert" hidden></p>
               <p class="home-login-footnote"><span aria-hidden="true">✓</span> Your order stays within your organisation's approval limits.</p>
             </form>
+            <div id="home-welcome" class="panel signin-card home-login-card home-welcome" hidden>
+              <div class="home-login-heading">
+                <p class="eyebrow">Buyer portal</p>
+                <h3>Welcome back</h3>
+                <p class="muted">Signed in as <strong id="home-welcome-name"></strong>.</p>
+              </div>
+              <a class="btn btn-primary" href="#order">Start an order <span aria-hidden="true">→</span></a>
+              <nav class="home-shortcuts" aria-label="Shortcuts">
+                <a href="#orders">My orders</a>
+                <a href="#explore">Explore the catalogue</a>
+              </nav>
+              <p class="home-login-footnote"><span aria-hidden="true">✓</span> Your order stays within your organisation's approval limits.</p>
+            </div>
           </div>
         </div>
       </section>
