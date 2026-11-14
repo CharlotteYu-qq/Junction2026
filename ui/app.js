@@ -1,5 +1,5 @@
 import { $, fmt, h, localISO, plural, storage } from './dom.js';
-import { barList, hideTip, toneChip } from './charts.js';
+import { attachTip, barList, hideTip, statusChip, toneChip } from './charts.js';
 
 // ====================================================================== state & api
 const S = {
@@ -171,19 +171,54 @@ function currentCustomer() {
   return S.customers.find((c) => c.id === S.session?.customer_id);
 }
 
-function renderExamples() {
+// Reorder suggestions from the customer's order history; the fixed examples only when it has none.
+async function renderExamples() {
+  let res = null;
+  try { res = await api('/api/suggestions'); } catch { /* fall back to the examples */ }
+  const suggested = res?.suggestions || [];
   const mine = EXAMPLES.filter((ex) => ex.customer === S.session.customer_id);
-  const shown = [...mine, ...EXAMPLES.filter((ex) => ex.generic && !mine.includes(ex))].slice(0, 4);
+  const shown = suggested.length ? suggested
+    : [...mine, ...EXAMPLES.filter((ex) => ex.generic && !mine.includes(ex))].slice(0, 4);
   $('#examples').replaceChildren(
-    h('span', { class: 'muted small', text: 'Try:' }),
+    h('span', { class: 'muted small', text: suggested.length ? 'Suggestions based on your order history:' : 'Try:' }),
     ...shown.map((ex) => h('button', {
-      type: 'button', class: 'example', text: ex.label,
+      type: 'button', class: 'example', text: ex.label, title: ex.explain || ex.text,
+      disabled: S.requestPending || S.submissionPending,
       onClick: () => {
         newRequest({ focus: false }); // an example starts a new conversation
         $('#request-text').value = ex.text;
         sendMessage();
       },
-    })));
+    })),
+    suggested.length ? rankingDetails(res) : null);
+}
+
+// The ranking is a published formula: show it, and every input and component, for the top items.
+function rankingDetails(res) {
+  const f = res.formula;
+  const picked = new Set(res.suggestions.map((s) => s.item));
+  const unit = (u) => (u === 'L' ? 'L' : 'kg');
+  const num = (v) => (v == null ? '–' : Number(v).toFixed(2));
+  return h('details', { class: 'suggest-why' },
+    h('summary', { text: 'How are these suggestions ranked?' }),
+    h('p', { class: 'formula' }, h('code', { text: f.score })),
+    h('ul', { class: 'formula-terms' },
+      Object.values(f.components).map((t) => h('li', { text: t })),
+      f.rules.map((t) => h('li', { class: 'muted', text: t }))),
+    h('div', { class: 'table-wrap' }, h('table', { class: 'rank-table' },
+      h('thead', {}, h('tr', {}, ['Item', 'Usual amount', 'T (days)', 'd (days)', 'Due', 'Frequency', 'Regularity', 'Trend', 'Score']
+        .map((t, k) => h('th', { class: k ? 'num' : null, text: t })))),
+      h('tbody', {}, res.ranked.map((i) => h('tr', { class: picked.has(i.item) ? 'is-picked' : null },
+        h('td', {}, i.item, picked.has(i.item) ? h('span', { class: 'tag tag-rec', text: 'Suggested' }) : null,
+          i.paused ? h('span', { class: 'cell-sub', text: `Paused: not bought for over ${fmt.num(3 * i.interval)} days` }) : null),
+        h('td', { class: 'num', text: `${fmt.num(i.quantity)} ${unit(i.unit)}` }),
+        h('td', { class: 'num', text: fmt.num(i.interval, 1) }),
+        h('td', { class: 'num', text: fmt.num(i.since) }),
+        h('td', { class: 'num', text: num(i.components.due) }),
+        h('td', { class: 'num', text: num(i.components.frequency) }),
+        h('td', { class: 'num', text: num(i.components.regularity) }),
+        h('td', { class: 'num', text: num(i.components.trend) }),
+        h('td', { class: 'num' }, h('strong', { text: num(i.score) }))))))));
 }
 
 // ---------------------------------------------------------------------- conversation with the agent
@@ -1029,7 +1064,129 @@ function decidedBy(o) {
   return o.decision.summary;
 }
 
-async function loadMyOrders() {
+function loadMyOrders() {
+  loadPortalOrders();
+  loadHistory();
+}
+
+// ---------------------------------------------------------------------- order history (My orders)
+const HISTORY_PAGE = 20;
+const CHANNEL_LABEL = { agent: 'Ordering agent', 'web shop': 'Web shop', phone: 'Phone' };
+
+async function loadHistory() {
+  const section = $('#order-history');
+  let st;
+  try { st = await api('/api/history/stats'); } catch { section.hidden = true; return; }
+  if (!st.available) { section.hidden = true; return; }
+  section.hidden = false;
+  const k = st.kpis;
+  $('#history-period').textContent = `Deliveries ${fmt.day(st.period.from)} – ${fmt.day(st.period.to)} · synthetic demo data`;
+  $('#history-kpis').replaceChildren(
+    kpi('Orders', fmt.num(k.orders), `${fmt.num(k.orders_per_week, 1)} a week · ${fmt.num(k.cancelled)} cancelled`),
+    kpi('Spend, excl. VAT', fmt.eur0(k.spend), `average order ${fmt.eur0(k.avg_order)}`),
+    kpi('Different items', fmt.num(k.items), `${fmt.num(k.lines)} order lines`),
+    kpi('Delivered in full', fmt.pct(k.delivered_in_full), 'of order lines; the rest arrived short'));
+
+  $('#history-monthly').replaceChildren(columnChart(st.monthly.map((m) => ({
+    label: new Date(`${m.month}-15`).toLocaleDateString('en-GB', { month: 'short' }),
+    value: m.spend, valueText: fmt.eur0(m.spend),
+    tooltip: [['Month', new Date(`${m.month}-15`).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })], ['Spend, excl. VAT', fmt.eur0(m.spend)], ['Orders', fmt.num(m.orders)]],
+  })), { ariaLabel: 'Spend per month, excluding VAT' }),
+  h('p', { class: 'chart-caption', text: 'The first and last month are partial. Hover a month for its orders.' }));
+
+  $('#history-items').replaceChildren(barList(st.top_items.slice(0, 8).map((t) => ({
+    label: t.item, sublabel: `${fmt.num(t.orders)} orders · ${fmt.num(t.quantity)} ${t.unit === 'L' ? 'L' : 'kg'} · usually ${t.usual_product}`,
+    value: t.spend, valueText: fmt.eur0(t.spend),
+    tooltip: [['Item', t.item], ['Spend, excl. VAT', fmt.eur0(t.spend)], ['Orders', fmt.num(t.orders)], ['Last delivery', fmt.day(t.last)]],
+  })), { ariaLabel: 'Top items by spend' }));
+
+  const shares = (rows, label = (x) => x) => barList(rows.slice(0, 6).map((r) => ({
+    label: label(r.label), value: r.share, valueText: `${fmt.pct(r.share)} · ${fmt.num(r.orders)}`,
+    tooltip: [['', label(r.label)], ['Orders', fmt.num(r.orders)], ['Share', fmt.pct(r.share)]],
+  })));
+  $('#history-channels').replaceChildren(shares(st.channels, (c) => CHANNEL_LABEL[c] || c),
+    h('p', { class: 'chart-caption', text: 'The ordering agent became a channel in September 2026.' }));
+  $('#history-people').replaceChildren(shares(st.people),
+    ...(st.sites.length > 1 ? [h('p', { class: 'chart-caption', text: `Kitchens: ${st.sites.map((s) => `${s.label} ${fmt.pct(s.share)}`).join(' · ')}` })] : []));
+
+  S.historyQuery = { q: '', status: '', offset: 0 };
+  const form = $('#history-filter');
+  if (!form.dataset.ready) {
+    form.dataset.ready = '1';
+    let timer;
+    const apply = () => { S.historyQuery = { q: $('#history-q').value.trim(), status: $('#history-status').value, offset: 0 }; loadHistoryOrders(false); };
+    form.addEventListener('submit', (e) => { e.preventDefault(); apply(); });
+    $('#history-q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(apply, 250); });
+    $('#history-status').addEventListener('change', apply);
+  }
+  loadHistoryOrders(false);
+}
+
+async function loadHistoryOrders(append) {
+  const host = $('#history-orders');
+  const { q, status, offset } = S.historyQuery;
+  let res;
+  try {
+    res = await api(`/api/history/orders?${new URLSearchParams({ q, status, offset, limit: HISTORY_PAGE })}`);
+  } catch (e) { host.replaceChildren(h('p', { class: 'empty', text: e.message })); return; }
+  const rows = res.orders.map(historyRow);
+  if (append) {
+    host.querySelector('tbody').append(...rows);
+    host.querySelector('.history-more')?.remove();
+  } else if (!res.total) {
+    host.replaceChildren(h('p', { class: 'empty', text: 'No past orders match.' }));
+    return;
+  } else {
+    host.replaceChildren(
+      h('p', { class: 'muted small', text: `${fmt.num(res.total)} ${plural('order', res.total)}` }),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'history-table' },
+        h('thead', {}, h('tr', {}, ['Order', 'Delivery', 'Items', 'Placed by', 'Total', 'Status'].map((t, i) => h('th', { class: i === 4 ? 'num' : null, text: t })))),
+        h('tbody', {}, rows))));
+  }
+  const shown = offset + res.orders.length;
+  if (shown < res.total) {
+    host.append(h('button', { type: 'button', class: 'btn btn-small history-more', text: `Show ${Math.min(HISTORY_PAGE, res.total - shown)} more of ${fmt.num(res.total - shown)}`,
+      onClick: () => { S.historyQuery.offset = shown; loadHistoryOrders(true); } }));
+  }
+}
+
+function historyRow(o) {
+  const unit = (u) => (u === 'L' ? 'L' : 'kg');
+  const short = o.lines.some((l) => l.delivered_quantity < l.quantity);
+  const status = o.status === 'cancelled' ? toneChip('neutral', '–', 'Cancelled')
+    : o.status === 'confirmed' ? toneChip('warning', '⏱', 'Confirmed')
+      : short ? toneChip('warning', '◐', 'Delivered short') : toneChip('good', '✓', 'Delivered');
+  const shownLines = o.lines.slice(0, 3);
+  return h('tr', {},
+    h('td', {}, o.id, h('span', { class: 'cell-sub', text: `ordered ${fmt.dateTime(o.ordered_at)}` }), o.note ? h('span', { class: 'tag tag-sub', text: o.note }) : null),
+    h('td', { text: fmt.day(o.delivery_date) }),
+    h('td', {},
+      shownLines.map((l) => h('span', { class: 'cell-line', title: l.product_name },
+        `${fmt.num(l.quantity)} ${unit(l.unit)} ${l.request}`,
+        l.delivered_quantity < l.quantity ? h('span', { class: 'short-note', text: ` (got ${fmt.num(l.delivered_quantity)})` }) : null,
+        h('span', { class: 'cell-sub', text: l.product_name }))),
+      o.lines.length > 3 ? h('span', { class: 'cell-sub', text: `+ ${o.lines.length - 3} more` }) : null),
+    h('td', {}, o.ordered_by, h('span', { class: 'cell-sub', text: `${CHANNEL_LABEL[o.channel] || o.channel} · ${o.site}` })),
+    h('td', { class: 'num', text: o.total == null ? '–' : fmt.eur(o.total) }),
+    h('td', {}, status));
+}
+
+// Columns for change over time: one series, the value in the tooltip, the peak and the latest labelled.
+function columnChart(rows, { ariaLabel } = {}) {
+  const max = Math.max(0, ...rows.map((r) => r.value ?? 0)) || 1;
+  const peak = rows.findIndex((r) => r.value === max);
+  return h('div', { class: 'col-chart', role: 'list', 'aria-label': ariaLabel, style: { gridTemplateColumns: `repeat(${rows.length}, minmax(0, 1fr))` } },
+    rows.map((r, i) => {
+      const col = h('div', { class: 'col', role: 'listitem', tabindex: '0', 'aria-label': `${r.label}: ${r.valueText}` },
+        h('span', { class: 'col-value', text: i === peak || i === rows.length - 1 ? r.valueText : '' }),
+        h('div', { class: 'col-area' }, h('div', { class: 'col-bar', style: { height: `${Math.max(1, (r.value / max) * 100)}%` } })),
+        h('span', { class: 'col-label', text: r.label }));
+      attachTip(col, r.tooltip);
+      return col;
+    }));
+}
+
+async function loadPortalOrders() {
   const host = $('#my-orders');
   let orders;
   try { orders = await api('/api/orders'); } catch (e) { host.replaceChildren(h('p', { class: 'empty', text: e.message })); return; }

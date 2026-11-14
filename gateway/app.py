@@ -23,6 +23,7 @@ from contracts import vocab
 from contracts.models import Customer, Offer, Order, ParsedRequest
 from gateway.catalog import load_catalog
 from gateway.config import TZ, settings
+from gateway import history, recommend
 from gateway.planner import _availability, _parse_dt, _price_info, build_offer, describe_item, verify_offer
 from gateway.store import Store
 from gateway.valio_client import ValioAPIError, ValioClient
@@ -33,7 +34,7 @@ from trust.policy import eur, evaluate, has_claim
 from trust.signing import Signer
 
 S = SimpleNamespace(catalog=None, catalog_error=None, valio=None, signer=None, customers=None, audit=None, store=None,
-                    sessions=None, ping=(0.0, False))
+                    sessions=None, history={}, ping=(0.0, False))
 
 OUTCOME_LABEL = {"auto_approve": "approved automatically", "needs_approval": "needs a person", "reject": "rejected"}
 
@@ -53,6 +54,9 @@ async def lifespan(_app: FastAPI):
     S.audit = AuditLog(settings.runtime_dir / "audit.jsonl")
     S.store = Store(settings.runtime_dir)
     S.sessions = SessionSigner(settings.runtime_dir / "session_secret")
+    S.history = recommend.load_history(settings.history_dir)
+    if S.history:
+        print(f"Order history loaded: {sum(map(len, S.history.values())):,} orders for {len(S.history)} customers", flush=True)
     yield
     await S.valio.close()
 
@@ -249,6 +253,34 @@ def well_known():
 def list_customers(who: Principal = Depends(buyer)):
     """The signed-in buyer's own customer record (never anyone else's)."""
     return [_customer_out(_customer(who.customer_id))]
+
+
+@app.get("/api/suggestions", tags=["history"])
+def suggestions(who: Principal = Depends(buyer)):
+    """Reorder suggestions from the signed-in customer's own order history, ranked by a published formula
+    (see `formula`; every suggestion carries its components). Clicking one still runs the full flow:
+    a fresh offer with live prices and the usual checks. `ranked` lists every regular item with its score."""
+    orders = S.history.get(who.customer_id, [])
+    today = _today()
+    return {
+        "formula": recommend.FORMULA,
+        "suggestions": recommend.suggest(orders, today) if orders else [],
+        "ranked": recommend.score_items(orders, today)[:10] if orders else [],
+    }
+
+
+@app.get("/api/history/stats", tags=["history"])
+def history_stats(who: Principal = Depends(buyer)):
+    """Statistics over the signed-in customer's own order history (synthetic demo data)."""
+    orders = S.history.get(who.customer_id, [])
+    return {"available": bool(orders), **(history.stats(orders, _today()) if orders else {})}
+
+
+@app.get("/api/history/orders", tags=["history"])
+def history_orders(q: str = Query("", max_length=80), status: Literal["", "delivered", "cancelled", "confirmed", "short"] = "",
+                   offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), who: Principal = Depends(buyer)):
+    """The signed-in customer's own past orders, newest first, filtered and paged."""
+    return history.page(S.history.get(who.customer_id, []), q.strip(), status, offset, limit)
 
 
 # ----------------------------------------------------------------------------- requests & offers

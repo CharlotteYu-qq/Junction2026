@@ -142,7 +142,39 @@
         </div>
       </div>
       <div class="container">
+        <h2 class="section-title">Placed in this portal</h2>
         <div id="my-orders"></div>
+        <section id="order-history" class="order-history" aria-labelledby="history-title" hidden>
+          <div class="history-head">
+            <h2 class="section-title" id="history-title">Order history</h2>
+            <span id="history-period" class="muted small"></span>
+          </div>
+          <div id="history-kpis" class="kpi-row"></div>
+          <div class="history-grid">
+            <section class="panel"><h3>Spend per month</h3><div id="history-monthly"></div></section>
+            <section class="panel"><h3>Top items by spend</h3><div id="history-items"></div></section>
+          </div>
+          <div class="history-grid">
+            <section class="panel"><h3>How orders were placed</h3><div id="history-channels"></div></section>
+            <section class="panel"><h3>Who ordered</h3><div id="history-people"></div></section>
+          </div>
+          <section class="panel">
+            <div class="panel-head">
+              <h3>Past orders</h3>
+              <form id="history-filter" class="history-filter" role="search">
+                <input id="history-q" type="search" placeholder="Search items, products, people" aria-label="Search past orders">
+                <select id="history-status" aria-label="Filter by status">
+                  <option value="">All orders</option>
+                  <option value="delivered">Delivered</option>
+                  <option value="short">Delivered short</option>
+                  <option value="cancelled">Cancelled</option>
+                  <option value="confirmed">Confirmed, not yet delivered</option>
+                </select>
+              </form>
+            </div>
+            <div id="history-orders"></div>
+          </section>
+        </section>
       </div>
     </section>
 
