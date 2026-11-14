@@ -19,7 +19,6 @@
         <span class="brand-word">Aimo</span>
       </a>
       <nav class="main-nav" aria-label="Main" hidden>
-        <a href="#home" data-page="home" data-roles="buyer">Home</a>
         <a href="#order" data-page="order" data-roles="buyer">Order</a>
         <a href="#orders" data-page="orders" data-roles="buyer">My orders</a>
         <a href="#explore" data-page="explore" data-roles="buyer">Explore</a>
@@ -44,11 +43,11 @@
             <a class="btn btn-primary" id="home-cta" href="#signin-buyer">Get started</a>
           </div>
           <div class="home-video-column">
-            <div class="video-embed-placeholder" role="group" aria-label="Introduction video placeholder">
-              <span class="video-play" aria-hidden="true">▶</span>
-              <strong>Introduction video</strong>
-              <span class="muted small">Add your video embed here</span>
-            </div>
+            <!-- preload="none": the 13 MB video is only fetched when someone presses play; the poster is a frame from it -->
+            <video id="intro-video" class="home-video" controls playsinline preload="none"
+              poster="media/introduction-poster.jpg" src="media/introduction.mp4" aria-label="Introduction video">
+              Your browser can't play this video. <a href="media/introduction.mp4">Download the introduction (MP4)</a>.
+            </video>
             <a class="scroll-cue" href="#get-started">
               <span><strong>There's more below</strong><br>Scroll down to get started</span>
               <span class="scroll-cue-arrow" aria-hidden="true">↓</span>
@@ -78,6 +77,10 @@
                   <span><strong>Stay in control</strong><span class="home-benefit-detail">Orders outside the agent's limit need a named person to approve them.</span></span>
                 </div>
               </div>
+              <button type="button" class="guide-open" id="guide-open" aria-haspopup="dialog">
+                <span class="guide-open-icon" aria-hidden="true">▶</span>
+                <span><strong>How to use Aimo</strong><span class="guide-open-detail">Watch the user guide, step by step</span></span>
+              </button>
             </div>
             <form id="signin-buyer" class="panel signin-card home-login-card" novalidate>
               <div class="home-login-heading">
@@ -212,6 +215,17 @@
       </div>
     </section>
   </main>
+
+  <!-- The user guide (YouTube). The player is only loaded when the dialog opens, and stopped when it closes. -->
+  <dialog id="guide-dialog" class="guide-dialog" aria-labelledby="guide-title">
+    <div class="guide-head">
+      <h2 id="guide-title">How to use Aimo</h2>
+      <button type="button" class="dialog-close" id="guide-close" aria-label="Close the user guide">×</button>
+    </div>
+    <div class="guide-frame"><iframe id="guide-player" title="Aimo user guide video"
+      allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div>
+    <p class="guide-foot"><a href="https://youtu.be/kfU8dfD2V04" target="_blank" rel="noopener">Open on YouTube <span aria-hidden="true">↗</span></a></p>
+  </dialog>
 
   <dialog id="approve-dialog" class="admin-dialog approve-dialog" aria-labelledby="approve-title">
     <div class="approve-head">
