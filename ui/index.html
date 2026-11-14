@@ -29,6 +29,7 @@
         <a href="#audit" data-page="audit" data-roles="valio">Audit trail</a>
         <a href="#explore" data-page="explore" data-roles="buyer valio">Explore</a>
       </nav>
+      <button type="button" class="btn btn-small admin-open" id="admin-open">Valio Aimo admin</button>
       <div id="session-box" class="session-box" hidden>
         <span id="session-who" class="session-who"></span>
         <button type="button" class="btn btn-small" id="sign-out">Sign out</button>
@@ -39,43 +40,66 @@
   <main>
     <!-- ======================================================= SIGN IN -->
     <section id="page-signin" class="page" hidden>
-      <div class="hero">
+      <section class="home-intro" aria-labelledby="home-title">
+        <div class="container home-intro-grid">
+          <div class="home-intro-copy">
+            <p class="eyebrow">Valio Aimo · foodservice ordering</p>
+            <h1 id="home-title">A simpler way to order for your kitchen.</h1>
+            <p class="lead">Tell the agent what your kitchen needs. It finds suitable products, checks prices and availability, and keeps you in control.</p>
+            <a class="btn btn-primary" href="#signin-buyer">Get started</a>
+          </div>
+          <div class="home-video-column">
+            <div class="video-embed-placeholder" role="group" aria-label="Introduction video placeholder">
+              <span class="video-play" aria-hidden="true">▶</span>
+              <strong>Introduction video</strong>
+              <span class="muted small">Add your video embed here</span>
+            </div>
+            <a class="scroll-cue" href="#signin-buyer">
+              <span><strong>There's more below</strong><br>Scroll down to get started</span>
+              <span class="scroll-cue-arrow" aria-hidden="true">↓</span>
+            </a>
+          </div>
+        </div>
+      </section>
+      <section id="get-started" class="home-start">
         <div class="container">
-          <p class="eyebrow">Sign in</p>
-          <h1>Two sides of one gateway</h1>
-          <p class="lead">Buyers say what their kitchen needs, and the agent places whatever is within their limit.
-            Valio Aimo staff review everything else and decide which customers are trusted, and for how much.</p>
+          <p id="signin-status" class="signin-note" role="status" hidden></p>
+          <div class="home-start-grid">
+            <div class="home-start-intro">
+              <p class="eyebrow">For professional kitchens</p>
+              <h2>Less time finding products. More time for good food.</h2>
+              <p class="home-start-copy">A clear, dependable way to get the ingredients your kitchen needs, with the right checks along the way.</p>
+              <div class="home-benefits" aria-label="How ordering works">
+                <div class="home-benefit">
+                  <span class="home-benefit-number" aria-hidden="true">01</span>
+                  <span><strong>Tell us what you need</strong><span class="home-benefit-detail">Describe your order in everyday language.</span></span>
+                </div>
+                <div class="home-benefit">
+                  <span class="home-benefit-number" aria-hidden="true">02</span>
+                  <span><strong>Compare suitable options</strong><span class="home-benefit-detail">Check product details, prices and availability.</span></span>
+                </div>
+                <div class="home-benefit">
+                  <span class="home-benefit-number" aria-hidden="true">03</span>
+                  <span><strong>Stay in control</strong><span class="home-benefit-detail">Orders outside your limit go to a person for approval.</span></span>
+                </div>
+              </div>
+            </div>
+            <form id="signin-buyer" class="panel signin-card home-login-card" novalidate>
+              <div class="home-login-heading">
+                <p class="eyebrow">Buyer portal</p>
+                <h3>Order for your kitchen</h3>
+                <p class="muted">Choose your business to continue.</p>
+              </div>
+              <div class="field"><label for="signin-customer">Company</label><select id="signin-customer"></select></div>
+              <div class="field signin-password"><label for="signin-buyer-password">Password</label>
+                <input id="signin-buyer-password" type="password" autocomplete="current-password"></div>
+              <button class="btn btn-primary" type="submit">Sign in as buyer <span aria-hidden="true">→</span></button>
+              <p class="signin-error bad small" role="alert" hidden></p>
+              <p class="home-login-footnote"><span aria-hidden="true">✓</span> Your order stays within your organisation's approval limits.</p>
+            </form>
+          </div>
         </div>
-      </div>
-      <div class="container">
-        <p id="signin-status" class="signin-note" role="status" hidden></p>
-        <div class="signin-grid">
-          <form id="signin-buyer" class="panel signin-card" novalidate>
-            <p class="eyebrow">Buyer portal</p>
-            <h2>Order for your kitchen</h2>
-            <p class="muted">Describe what you need in your own words. Orders within your limit are placed automatically;
-              anything else goes to Valio Aimo for approval.</p>
-            <div class="field"><label for="signin-customer">Company</label><select id="signin-customer"></select></div>
-            <div class="field signin-password"><label for="signin-buyer-password">Password</label>
-              <input id="signin-buyer-password" type="password" autocomplete="current-password"></div>
-            <button class="btn btn-primary" type="submit">Sign in as buyer</button>
-            <p class="signin-error bad small" role="alert" hidden></p>
-          </form>
-          <form id="signin-valio" class="panel signin-card signin-card-valio" novalidate>
-            <p class="eyebrow">Valio Aimo admin</p>
-            <h2>Review and manage</h2>
-            <p class="muted">Approve or reject the orders the agent could not place on its own, and manage the customer
-              whitelist.</p>
-            <div class="field"><label for="signin-name">Your name</label>
-              <input id="signin-name" type="text" maxlength="60" autocomplete="name">
-              <span class="hint muted">Recorded with every decision you make.</span></div>
-            <div class="field signin-password"><label for="signin-valio-password">Password</label>
-              <input id="signin-valio-password" type="password" autocomplete="current-password"></div>
-            <button class="btn btn-primary" type="submit">Sign in to Valio admin</button>
-            <p class="signin-error bad small" role="alert" hidden></p>
-          </form>
-        </div>
-      </div>
+      </section>
     </section>
 
     <!-- ======================================================= ORDER -->
@@ -224,6 +248,30 @@
       </div>
     </section>
   </main>
+
+  <dialog id="admin-dialog" class="admin-dialog" aria-labelledby="admin-dialog-title">
+    <div class="admin-dialog-banner">
+      <div class="admin-dialog-head">
+        <span class="admin-dialog-mark" aria-hidden="true">A</span>
+        <button type="button" class="dialog-close" id="admin-close" aria-label="Close admin sign in">×</button>
+      </div>
+      <p class="admin-dialog-kicker">Valio Aimo · Admin</p>
+      <h2 id="admin-dialog-title">Review and manage</h2>
+    </div>
+    <div class="admin-dialog-body">
+      <p class="admin-dialog-description">Approve or reject orders the agent could not place, and manage the customer whitelist.</p>
+      <form id="signin-valio" class="admin-signin-form" novalidate>
+        <div class="field"><label for="signin-name">Your name</label>
+          <input id="signin-name" type="text" maxlength="60" autocomplete="name" placeholder="Enter your name">
+          <span class="hint muted">Recorded with every decision you make.</span></div>
+        <div class="field signin-password"><label for="signin-valio-password">Password</label>
+          <input id="signin-valio-password" type="password" autocomplete="current-password" placeholder="Enter your password"></div>
+        <button class="btn btn-primary" type="submit">Sign in to admin <span aria-hidden="true">→</span></button>
+        <p class="signin-error bad small" role="alert" hidden></p>
+      </form>
+      <p class="admin-dialog-note"><span aria-hidden="true">✓</span> Decisions are recorded in the audit trail.</p>
+    </div>
+  </dialog>
 
   <footer class="site-footer">
     <div class="container footer-inner">

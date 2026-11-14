@@ -1052,6 +1052,7 @@ function showSignIn(message = '') {
   for (const p of PAGES) $(`#page-${p}`).hidden = true;
   $('.main-nav').hidden = true;
   $('#session-box').hidden = true;
+  $('#admin-open').hidden = false;
   $('#reset-demo').hidden = true;
   $('#page-signin').hidden = false;
   hideTip();
@@ -1076,6 +1077,11 @@ async function signIn(form, body) {
 }
 
 function initSignIn() {
+  $('#admin-open').addEventListener('click', () => {
+    $('#admin-dialog').showModal();
+    $('#signin-name').focus();
+  });
+  $('#admin-close').addEventListener('click', () => $('#admin-dialog').close());
   $('#signin-buyer').addEventListener('submit', (e) => {
     e.preventDefault();
     const customer = $('#signin-customer').value;
@@ -1109,6 +1115,7 @@ function showPortal() {
   $('#session-who').replaceChildren(h('strong', { text: s.name }),
     h('span', { class: 'muted', text: s.role === 'buyer' ? ' · buyer portal' : ' · Valio Aimo admin' }));
   $('#session-box').hidden = false;
+  $('#admin-open').hidden = true;
   document.querySelectorAll('.main-nav a').forEach((a) => { a.hidden = !a.dataset.roles.split(' ').includes(s.role); });
   $('.main-nav').hidden = false;
   $('#reset-demo').hidden = s.role !== 'valio';
