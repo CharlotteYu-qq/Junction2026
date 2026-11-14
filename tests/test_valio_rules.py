@@ -1,7 +1,7 @@
 """Valio's answers about the mock API: lot size 0.01 means 1, 999999+ means unknown stock, 429 blocks for 30 s."""
 import asyncio
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 from gateway import valio_client
@@ -28,6 +28,29 @@ class StockTests(unittest.TestCase):
 
     def test_no_schedule_lines_is_unavailable(self):
         self.assertEqual(_availability({"scheduleLines": []}, 1, DAY, NOW).status, "unavailable")
+
+
+class CutoffTests(unittest.TestCase):
+    """closingTime is the cut-off for availableDate (the earliest delivery), not for the requested day."""
+    NOW = datetime(2026, 11, 14, 23, 25, tzinfo=timezone(timedelta(hours=2)))  # Saturday evening
+    TERMINAL = {"scheduleLines": [{"availableAmount": 999999, "availableDate": "2026-11-16"}],  # Monday
+                "closingTime": "2026-11-12T15:00:00+02:00", "logisticModel": "Terminal"}  # Thursday 15:00, passed
+
+    def test_a_later_day_is_not_blocked_by_the_earliest_days_cutoff(self):
+        a = _availability(self.TERMINAL, 40, date(2026, 11, 19), self.NOW)  # Thursday: same 4-day lead time
+        self.assertEqual(a.status, "ok")
+        self.assertEqual(a.closing_time, datetime(2026, 11, 15, 15, 0, tzinfo=timezone(timedelta(hours=2))))
+
+    def test_the_earliest_day_itself_is_past_its_cutoff(self):
+        a = _availability(self.TERMINAL, 40, date(2026, 11, 16), self.NOW)
+        self.assertEqual(a.status, "cutoff_passed")
+        self.assertEqual(a.closing_time.date(), date(2026, 11, 12))
+
+    def test_the_suggested_day_keeps_the_products_lead_time(self):
+        from gateway.alternatives import _after_cutoff
+        a = _availability(self.TERMINAL, 40, date(2026, 11, 16), self.NOW)
+        # next cut-off we can make is Sunday 15:00, so with 4 days' lead time: Thursday 19 Nov
+        self.assertEqual(_after_cutoff(a, date(2026, 11, 16), self.NOW), date(2026, 11, 19))
 
 
 class LotTests(unittest.TestCase):

@@ -107,6 +107,28 @@ def _content(p: dict, price: PriceInfo) -> tuple[float | None, str | None]:
     return content, unit
 
 
+PIECES_IN_NAME = re.compile(r"\b(\d{1,4}) ?(?:kpl|pcs|pc|st|stk)\b", re.I)  # "napkin 125pcs", "125kpl"
+EGG_COUNT = re.compile(r"\b(?:XS|S|M|L|XL)(\d{1,3})\b")  # Finnish egg packs: size and count, "M10" = 10 medium eggs
+EGG_WORD = re.compile(r"\beggs?\b|kanan ?muna", re.I)  # not "munakoiso" (aubergine)
+
+
+def pieces_per_pack(p: dict) -> int:
+    """How many pieces one base unit holds when the product name says so (a box of 10 eggs, a pack of
+    125 napkins); otherwise 1, so a pack counts as one piece."""
+    if p.get("base_unit") == "ST":
+        return 1
+    names = [p.get("name") or "", p.get("name_fi") or ""]
+    for name in names:
+        m = PIECES_IN_NAME.search(name)
+        if m and int(m.group(1)) > 0:
+            return int(m.group(1))
+    if any(EGG_WORD.search(n) for n in names):
+        m = EGG_COUNT.search(names[0]) or EGG_COUNT.search(names[1])
+        if m and int(m.group(1)) > 0:
+            return int(m.group(1))
+    return 1
+
+
 def order_quantity(req: RequestItem, p: dict, content: float | None, unit: str | None) -> tuple[float | None, str]:
     if req.quantity is None or req.unit is None:
         return None, "quantity missing"
@@ -124,7 +146,7 @@ def order_quantity(req: RequestItem, p: dict, content: float | None, unit: str |
         size = 1.0 if sales_unit == base_unit else p["units"].get(sales_unit)
         if base_unit in ("KG", "L") or not size or size <= 0:
             return None, "piece count per sales unit is unknown"
-        raw = req.quantity / size
+        raw = req.quantity / (size * pieces_per_pack(p))
     else:
         raw = req.quantity
     lot = float(p.get("lot") or 1)
@@ -137,21 +159,32 @@ def order_quantity(req: RequestItem, p: dict, content: float | None, unit: str |
     return round(qty, 3), ""
 
 
+def cutoff_for(closing: datetime | None, available_date: date | None, day: date) -> datetime | None:
+    """The order cut-off for delivery on `day`. Valio's closingTime is the cut-off for availableDate, the earliest
+    delivery, whatever day was asked for (e.g. Thu 15:00 for a Monday). A later day is assumed to need the same
+    lead time (Sun 15:00 for Thursday): an estimate, checked again when the order is placed."""
+    if closing and available_date and day > available_date:
+        return closing + timedelta(days=(day - available_date).days)
+    return closing
+
+
 def _availability(row: dict | None, qty: float | None, requested: date, time_now: datetime) -> Availability:
     if not row:
         return Availability(status="unknown", note="no answer from the availability API")
     lines = row.get("scheduleLines") or []
     closing = _parse_dt(row.get("closingTime"))
     model = row.get("logisticModel")
-    base = dict(closing_time=closing, logistic_model=model, sales_block=bool(row.get("salesBlock")))
     if row.get("salesBlock") or (lines and lines[0].get("salesBlock")):
-        return Availability(status="unavailable", note="sales block", **base)
+        return Availability(status="unavailable", note="sales block", closing_time=closing, logistic_model=model,
+                            sales_block=bool(row.get("salesBlock")))
     if not lines:
-        return Availability(status="unavailable", note="cannot currently be delivered on any date", **base)
+        return Availability(status="unavailable", note="cannot currently be delivered on any date", closing_time=closing,
+                            logistic_model=model)
     line = lines[0]
     amount = line.get("availableAmount")
     available_date = date.fromisoformat(line["availableDate"][:10]) if line.get("availableDate") else None
-    out = Availability(available_amount=amount, available_date=available_date, **base)
+    closing = cutoff_for(closing, available_date, requested)
+    out = Availability(available_amount=amount, available_date=available_date, closing_time=closing, logistic_model=model)
     terminal = model == "Terminal"
     # Valio: an amount of 999999 or more means the stock is not known and any quantity can be ordered
     # (typically Terminal products that are not restocked by Valio Aimo).
@@ -331,6 +364,15 @@ async def build_offer(
         "warning" if parsed.warnings or not parsed.items or any(i.quantity is None for i in parsed.items) else "done",
         parse_ms,
     )
+
+    # The customer's usual products, without any the request rules out ("cheese, not cream cheese" drops the
+    # usual mascarpone), so they are neither added as options nor ranked first.
+    if preferred:
+        preferred = [
+            {pid: n for pid, n in usual.items()
+             if pid in catalog.by_id and not catalog.excluded(catalog.by_id[pid], it.search_phrases or [it.product_query], it.exclude_words)}
+            for usual, it in zip(preferred, parsed.items)
+        ]
 
     # 1) narrow down using static data only
     shortlists: list[list[tuple[dict, float, bool, list[str], str]]] = []

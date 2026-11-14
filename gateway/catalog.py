@@ -250,6 +250,23 @@ class Catalog:
     def _penalised(word: str, penalties: set[str]) -> bool:
         return word in penalties or (word.endswith("s") and word[:-1] in penalties) or (word.endswith("es") and word[:-2] in penalties)
 
+    @staticmethod
+    def _exclusions(phrases: list[str], exclude_words: list[str] | None) -> tuple[set[str], list[re.Pattern]]:
+        """The request's exclusions: single words, and phrases ("cream cheese", "hot smoked") matched as a whole.
+        Nothing that is part of what is searched for is excluded."""
+        searched = " | ".join(ph.lower() for ph in phrases if ph)
+        query_words = set(re.findall(r"[\wäöåé-]+", searched))
+        excl = {w.lower().strip() for w in exclude_words or [] if w and w.strip()}
+        words = {w for w in excl if " " not in w} - query_words
+        multi = [re.compile(rf"\b{re.escape(w)}") for w in sorted(excl) if " " in w and w not in searched]
+        return words, multi
+
+    def excluded(self, p: dict, phrases: list[str], exclude_words: list[str] | None) -> bool:
+        """Whether the product's English name has a word or phrase the request excludes."""
+        words, multi = self._exclusions(phrases, exclude_words)
+        en = (p.get("name") or "").lower()
+        return any(self._penalised(w, words) for w in re.findall(r"[\wäöåé]+", en)) or any(rx.search(en) for rx in multi)
+
     def search(self, phrases: list[str], exclude_words: list[str] | None = None, limit: int = 60) -> list[tuple[dict, float]]:
         """Rank products for a list of alternative phrases (words inside one phrase are ANDed).
 
@@ -263,7 +280,8 @@ class Catalog:
         if not phrase_words:
             return []
         query_words = {w for ws in phrase_words for w in ws}
-        penalties = (DERIVATIVE_WORDS | set(w.lower() for w in exclude_words or [])) - query_words
+        excl_words, excl_phrases = self._exclusions(phrases, exclude_words)
+        penalties = (DERIVATIVE_WORDS - query_words) | excl_words
         compiled = [
             [(w, re.compile(rf"\b{re.escape(w)}(?:e?s)?\b"), re.compile(rf"\b{re.escape(w)}")) for w in ws] for ws in phrase_words
         ]
@@ -297,7 +315,7 @@ class Catalog:
                 best = max(best, total)
             if best <= 0:
                 continue
-            hits = sum(1 for w in en_words if self._penalised(w, penalties))
+            hits = sum(1 for w in en_words if self._penalised(w, penalties)) + sum(1 for rx in excl_phrases if rx.search(en))
             best -= min(3.0 * hits, 6.0)
             if negated.search(en):
                 best -= 4.0

@@ -94,6 +94,32 @@ class CatalogTests(unittest.TestCase):
         req.unit = "PCS"
         self.assertEqual(order_quantity(req, jug, None, None), (100, ""))
 
+    def test_pieces_count_what_a_pack_holds(self):
+        eggs = RequestItem(text="300 eggs", product_query="egg", quantity=300, unit="PCS")
+        box = product("e10", "Kieku Barn egg M10 580g", sales_unit="RAS", base_unit="RAS", units={"RAS": 1, "KI": 24},
+                      content=0.58, content_unit="KG")
+        self.assertEqual(order_quantity(eggs, box, 0.58, "KG"), (30, ""))  # 30 boxes of 10, not 300 boxes
+        case = product("e6", "20 x Kieku Barn egg L6 408g", sales_unit="KI", base_unit="RAS", units={"KI": 20, "RAS": 1})
+        self.assertEqual(order_quantity(eggs, case, None, None), (3, ""))  # 120 eggs a case
+        napkins = product("n", "Duni 40cm 3-ply napkin 125pcs", sales_unit="PAK", base_unit="PAK", units={"PAK": 1})
+        req = RequestItem(text="500 napkins", product_query="napkin", quantity=500, unit="PCS")
+        self.assertEqual(order_quantity(req, napkins, None, None), (4, ""))
+        aubergine = product("a", "Aubergine L", name_fi="Munakoiso L", sales_unit="RAS", base_unit="RAS", units={"RAS": 1})
+        req = RequestItem(text="10 aubergines", product_query="aubergine", quantity=10, unit="PCS")
+        self.assertEqual(order_quantity(req, aubergine, None, None), (10, ""))
+
+    def test_a_multi_word_exclusion_rules_out_that_product(self):
+        catalog = Catalog([
+            product("masc", "Castelli Mascarpone cream cheese 250g", category="cheese"),
+            product("edam", "Valio Edam cheese 1 kg", category="cheese"),
+        ])
+        found = [p["id"] for p, _ in catalog.search(["cheese"], ["cream cheese"])]
+        self.assertEqual(found[0], "edam")
+        self.assertTrue(catalog.excluded(catalog.by_id["masc"], ["cheese"], ["cream cheese"]))
+        self.assertFalse(catalog.excluded(catalog.by_id["edam"], ["cheese"], ["cream cheese"]))
+        # what is searched for is never excluded
+        self.assertFalse(catalog.excluded(catalog.by_id["masc"], ["cream cheese"], ["cream cheese", "spread"]))
+
     def test_missing_piece_count_is_not_assumed_one(self):
         req = RequestItem(text="100 pieces", product_query="milk", quantity=100, unit="PCS")
         case = product("milk", "Milk 1 l", sales_unit="KI", units={})
