@@ -32,6 +32,10 @@ from trust.signing import Signer, content_hash
 SHORTLIST = 12
 UNLIMITED = 1_000_000  # the mock returns 9 999 999 999 for stocked items, 999 999 for supplier items
 STATUS_POINTS = {"ok": 3, "partial": 1, "late": 1, "cutoff_passed": 1, "unknown": 0, "unavailable": -2}
+# Carbon footprint as a tie-breaker: options whose totals differ by at most this share count as the same price,
+# and their other points (match, availability, relevance, reliability) may differ by at most CO2_OTHER_POINTS.
+CO2_PRICE_TOLERANCE = 0.02
+CO2_OTHER_POINTS = 5.0
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -197,6 +201,7 @@ def _rank(cands: list[Candidate]) -> None:
     lo, hi = (min(totals), max(totals)) if totals else (0.0, 0.0)
     good = [c.line_total for c in cands if c.line_total is not None and c.meets_constraints and c.availability.status == "ok"]
     good_lo = min(good) if good else None
+    other_points: dict[str, float] = {}  # score without the price part, for the CO2e tie-breaker
     for c in cands:
         cost_pts = 0.0
         if c.line_total is not None:
@@ -211,6 +216,7 @@ def _rank(cands: list[Candidate]) -> None:
             + (0 if c.line_total is not None else -60),
             2,
         )
+        other_points[c.product_id] = c.score - cost_pts
         reasons = []
         reasons.append("meets the request" if c.meets_constraints else "substitute: " + ", ".join(c.constraint_notes))
         reasons.append(
@@ -231,6 +237,37 @@ def _rank(cands: list[Candidate]) -> None:
             reasons.append(f"{rel:.0%} delivery reliability")
         c.rank_reason = (c.rank_reason + " · " if c.rank_reason else "") + " · ".join(reasons)
     cands.sort(key=lambda c: c.score, reverse=True)
+    _co2_tiebreak(cands, other_points)
+
+
+def _same_price(a: Candidate, b: Candidate) -> bool:
+    if a.line_total is None or b.line_total is None:
+        return False
+    return abs(a.line_total - b.line_total) <= CO2_PRICE_TOLERANCE * max(a.line_total, b.line_total, 0.01)
+
+
+def _co2_tiebreak(cands: list[Candidate], other_points: dict[str, float]) -> None:
+    """At (nearly) the same price, put the option with the lower carbon footprint first.
+
+    Only between otherwise comparable options: both match the request or both don't, same availability,
+    and similar relevance and reliability. The CO2e figure is a product-group average, so this reorders
+    options from different product groups; options in the same group have the same figure.
+    """
+    for _ in range(len(cands)):
+        swapped = False
+        for i in range(len(cands) - 1):
+            a, b = cands[i], cands[i + 1]
+            if (a.co2_per_kg is not None and b.co2_per_kg is not None and b.co2_per_kg < a.co2_per_kg
+                    and a.meets_constraints == b.meets_constraints and a.availability.status == b.availability.status
+                    and _same_price(a, b)
+                    and abs(other_points[a.product_id] - other_points[b.product_id]) <= CO2_OTHER_POINTS):
+                cands[i], cands[i + 1] = b, a
+                swapped = True
+                if "lower CO₂e" not in b.rank_reason:
+                    b.rank_reason += (f" · lower CO₂e than a similarly priced option "
+                                      f"({b.co2_per_kg:.2g} vs {a.co2_per_kg:.2g} kg CO₂e/kg, product-group average)")
+        if not swapped:
+            break
 
 
 def _recommend(cands: list[Candidate]) -> str | None:
