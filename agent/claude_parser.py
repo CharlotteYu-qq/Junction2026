@@ -8,6 +8,7 @@ Claude Haiku 5.5 has none, so a refusal there falls back to the rule-based parse
 from __future__ import annotations
 
 import json
+import math
 from datetime import date
 
 from contracts.models import Constraints, ParsedRequest, RequestItem
@@ -94,6 +95,8 @@ Rules:
   conflicting substitution instructions, unsupported restrictions or contradictory requirements.
   Explain what needs clarification in notes. Do not silently drop these conditions.
 - Ignore sentences that are not about products (e.g. "find the best option").
+- Only include products the buyer actually named. Never guess a product: if an amount comes without
+  one ("200 litres for Friday"), return no item for it and ask which product they mean.
 - The input may be a conversation between the buyer and you, the ordering agent. Combine everything
   the buyer said: later messages complete or correct earlier ones ("200 litres" answers "how much
   milk?"). If the buyer confirmed an amount you estimated, it is no longer estimated.
@@ -109,8 +112,13 @@ async def parse(text: str, today: date, model: str) -> ParsedRequest:
     return (await parse_dialogue([("buyer", text)], today, model))[0]
 
 
-async def parse_dialogue(turns: list[tuple[str, str]], today: date, model: str) -> tuple[ParsedRequest, str]:
-    """A conversation [("buyer" | "agent", text), ...] -> (order lines so far, suggested follow-up question)."""
+async def parse_dialogue(
+    turns: list[tuple[str, str]], today: date, model: str, meta: dict | None = None,
+) -> tuple[ParsedRequest, str]:
+    """A conversation [("buyer" | "agent", text), ...] -> (order lines so far, suggested follow-up question).
+
+    If `meta` is given, the served model, token usage and stop reason are recorded in it (for evals).
+    """
     import anthropic  # optional dependency
 
     buyer_text = "\n".join(text for role, text in turns if role == "buyer")
@@ -133,6 +141,11 @@ async def parse_dialogue(turns: list[tuple[str, str]], today: date, model: str) 
         system=SYSTEM.format(today=today.isoformat(), weekday=today.strftime("%A")),
         messages=[{"role": "user", "content": content}],
     )
+    if meta is not None:
+        u = response.usage
+        meta.update(model=response.model, stop_reason=response.stop_reason, usage={
+            k: getattr(u, k, 0) or 0
+            for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")})
     if response.stop_reason == "refusal":
         raise RuntimeError("the model declined this request")
     if response.stop_reason == "max_tokens":
@@ -154,7 +167,28 @@ async def parse_dialogue(turns: list[tuple[str, str]], today: date, model: str) 
     parsed.substitution_allowed = parsed.substitution_allowed and substitutions
     parsed.clarification_required = parsed.clarification_required or clarification
     parsed.warnings.extend(notes)
+    check_amounts(parsed, buyer_text, today)
     return parsed, str(data.get("follow_up_question") or "")
+
+
+def check_amounts(parsed: ParsedRequest, buyer_text: str, today: date) -> None:
+    """Deterministic guard on amounts. An amount written with a unit ("500 g") is unambiguous, so when the
+    model reads it differently (500 kg) it is corrected if only one item uses that unit, and otherwise the
+    buyer has to confirm it (the assumption makes the agent ask)."""
+    from agent.rules_parser import stated_amounts
+
+    amounts = stated_amounts(buyer_text, today)
+    for it in parsed.items:
+        if it.quantity is None or it.unit is None or it.assumption:
+            continue
+        written = [q for q, u in amounts if u == it.unit]
+        if not written or any(math.isclose(q, it.quantity, rel_tol=0.01) for q in written):
+            continue
+        if len(written) == 1 and sum(1 for x in parsed.items if x.unit == it.unit) == 1:
+            parsed.warnings.append(f"Read {it.product_query} as {written[0]:g} {it.unit}, as written (the model said {it.quantity:g})")
+            it.quantity = written[0]
+        else:
+            it.assumption = f"please confirm the amount ({it.quantity:g} {it.unit})"
 
 
 def to_parsed(data: dict, today: date) -> ParsedRequest:

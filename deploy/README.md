@@ -47,7 +47,7 @@ listens on `127.0.0.1:8000`, and plain `http://<IP>` redirects to the HTTPS name
 server, so later deploys don't need `DOMAIN=` again. A real domain works the same way: point an A record at the IP
 and pass that name instead.
 
-Current deployment: **https://aimo.135-181-63-188.sslip.io** (sign in to the buyer portal or the Valio Aimo admin; passwords in the team chat).
+Current deployment: **https://aimo.135-181-63-188.sslip.io** (buyer portal; password in the team chat).
 
 ## Useful commands on the server
 
@@ -58,12 +58,12 @@ journalctl -u aimo-gateway -f            # live logs
 grep _PASSWORD /opt/aimo-gateway/.env   # sign-in passwords
 ```
 
-To change a password, edit `BUYER_PASSWORD` or `VALIO_PASSWORD` in `/opt/aimo-gateway/.env` and run `systemctl restart aimo-gateway`.
+To change the password, edit `BUYER_PASSWORD` in `/opt/aimo-gateway/.env` and run `systemctl restart aimo-gateway`.
 
 ## Notes
 
-- The site opens on a sign-in page with two portals: buyers (one per customer, `BUYER_PASSWORD`) and
-  Valio Aimo staff (`VALIO_PASSWORD`). The server checks the role on every API call.
+- The site opens on the buyer sign-in (one account per customer, `BUYER_PASSWORD`). The server checks the
+  customer on every API call.
   `/api/health` and `/.well-known/aimo-agent-gateway.json` stay open.
 - Without `DOMAIN` it's plain HTTP on the IP address (see the HTTPS section above).
 - **Delete the instance after Junction.** An on-demand instance keeps costing money until it is deleted.

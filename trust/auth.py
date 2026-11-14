@@ -1,12 +1,12 @@
-"""Sign-in for the two portals: buyers (one account per customer) and Valio Aimo staff.
+"""Sign-in for the buyer portal: one account per customer.
 
 A session is a small cookie signed with HMAC-SHA256, so it survives restarts and needs no session table.
-The signing secret is created once in data/runtime/. Passwords come from .env (see gateway/config.py);
-with no passwords configured (local development), signing in needs no password.
+The signing secret is created once in data/runtime/. The password comes from .env (BUYER_PASSWORD, see
+gateway/config.py); with none configured (local development), signing in needs no password.
 
-Roles decide what a request may do; gateway/app.py checks them on every endpoint:
-    buyer -> order as its own customer, see its own offers and orders
-    valio -> review queue, customers and limits, audit trail, demo reset
+A buyer orders as its own customer and sees only its own offers and orders; gateway/app.py checks this on
+every endpoint. Orders outside the agent's authority are approved by a named person in the customer's
+organisation when the order is placed (there is no separate approver account).
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
 
-Role = Literal["buyer", "valio"]
+Role = Literal["buyer"]
 COOKIE = "aimo_session"
 SESSION_SECONDS = 12 * 3600
 
@@ -30,13 +30,13 @@ class Principal:
     """Who is making a request."""
 
     role: Role
-    name: str  # buyer: the customer's name; valio: the staff member's name
-    customer_id: Optional[str] = None  # buyers only
+    name: str  # the customer's name
+    customer_id: Optional[str] = None
 
     @property
     def actor(self) -> str:
         """How this principal appears in the audit trail."""
-        return f"customer:{self.customer_id}" if self.role == "buyer" else f"human:{self.name}"
+        return f"customer:{self.customer_id}"
 
 
 def _b64(data: bytes) -> str:
@@ -73,10 +73,8 @@ class SessionSigner:
             body = json.loads(_unb64(payload))
         except (ValueError, UnicodeDecodeError):
             return None
-        if body.get("exp", 0) < (now or time.time()) or body.get("r") not in ("buyer", "valio"):
-            return None
-        if body["r"] == "buyer" and not body.get("c"):
-            return None
+        if body.get("exp", 0) < (now or time.time()) or body.get("r") != "buyer" or not body.get("c"):
+            return None  # also ends sessions of the removed Valio Aimo admin
         return Principal(role=body["r"], name=str(body.get("n") or ""), customer_id=body.get("c"))
 
 

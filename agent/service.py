@@ -32,11 +32,13 @@ async def parse_request(text: str, today: date, *, api_key: str, mode: str, mode
 
 async def parse_conversation(
     turns: list[tuple[str, str]], previous: ParsedRequest | None, today: date, *, api_key: str, mode: str, model: str,
+    meta: dict | None = None,
 ) -> tuple[ParsedRequest, str, int]:
     """Understand a conversation with the buyer. Returns (what was understood, follow-up question or "", ms).
 
     Claude reads the whole conversation. The rule-based fallback merges the latest answer into what the
     agent understood after the previous turn. Either way, dialogue.py decides whether a question is needed.
+    `meta`, if given, receives the served model, usage and stop reason, and `fallback` when Claude failed.
     """
     t = time.perf_counter()
     buyer = [text for role, text in turns if role == "buyer"]
@@ -45,9 +47,11 @@ async def parse_conversation(
         from agent import claude_parser
 
         try:
-            parsed, suggested = await claude_parser.parse_dialogue(turns, today, model)
+            parsed, suggested = await claude_parser.parse_dialogue(turns, today, model, meta)
         except Exception as e:  # never let the LLM path break ordering
             note = f"Claude parser unavailable ({type(e).__name__}: {str(e)[:120]}): used the rule-based parser"
+            if meta is not None:
+                meta["fallback"] = note
     if parsed is None:
         if previous is not None and len(buyer) > 1:
             parsed = dialogue.merge_answer(previous, buyer[-1], today)

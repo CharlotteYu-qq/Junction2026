@@ -190,7 +190,7 @@ class OrderLine(BaseModel):
     is_recommended: bool = True
 
 
-OrderStatus = Literal["placed", "pending_approval", "rejected"]
+OrderStatus = Literal["placed", "pending_approval", "rejected", "cancelled"]
 
 
 class Order(BaseModel):
@@ -208,6 +208,8 @@ class Order(BaseModel):
     reviewer: Optional[str] = None
     reviewed_at: Optional[datetime] = None
     review_comment: Optional[str] = None
+    cancelled_at: Optional[datetime] = None
+    cancel_reason: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- audit

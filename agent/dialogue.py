@@ -101,6 +101,10 @@ def merge_answer(previous: ParsedRequest, answer: str, today: date) -> ParsedReq
     if not new.items:
         # "200 litres, Friday" names no product: give the amounts to the items still waiting for one
         amounts = rules_parser.stated_amounts(answer, today)
+        if not waiting and len(amounts) == 1:
+            # "make it 300 litres" corrects the one item measured in that unit
+            same_unit = [it for it in out.items if it.unit == amounts[0][1]]
+            waiting = same_unit if len(same_unit) == 1 else []
         for item, (quantity, unit) in zip(waiting, amounts):
             item.quantity, item.unit, item.assumption = quantity, unit, ""
         if not amounts and _YES.match(answer):  # "yes" confirms the estimates the agent proposed
@@ -113,3 +117,25 @@ def merge_answer(previous: ParsedRequest, answer: str, today: date) -> ParsedReq
         out.warnings.append("No delivery date given: assumed the next weekday")
     out.warnings += [f"No quantity for “{it.product_query}”" for it in out.items if it.quantity is None]
     return out
+
+
+# ----------------------------------------------------------------------------- cancelling an order in the chat
+
+_CANCEL = re.compile(r"\b(?:cancel\w*|call\s+off|peru(?:uta|a|ttaa|tan|utus)\w*|avbeställ\w*|avboka\w*|annuller\w*)", re.I)
+_ORDER_WORD = re.compile(r"\b(?:order\w*|tilau\w*|beställning\w*)", re.I)
+_ORDER_ID = re.compile(r"\bO-?(\d{1,6})\b", re.I)
+_NEGATED = re.compile(r"\b(?:don'?t|do\s+not|never|älä|inte)\b", re.I)
+
+
+def cancel_intent(text: str) -> dict | None:
+    """"Cancel my last order", "cancel O-0009", "peruuta tilaus" -> {"order_id": "O-0009" or None (the latest)}.
+
+    Deterministic, like the decision to ask a question. A bare "cancel" is not an order cancellation (it
+    usually drops the request being discussed): the message must name an order or an order number.
+    """
+    if not _CANCEL.search(text) or _NEGATED.search(text):
+        return None
+    number = _ORDER_ID.search(text)
+    if not number and not _ORDER_WORD.search(text):
+        return None
+    return {"order_id": f"O-{int(number.group(1)):04d}" if number else None}

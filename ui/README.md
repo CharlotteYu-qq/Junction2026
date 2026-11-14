@@ -14,7 +14,7 @@ Plain HTML/CSS/JS modules, with no build step. FastAPI serves them at `/`.
 
 | File | What it does |
 |---|---|
-| `index.html` | Buyer-first landing page, buyer sign-in, separate Valio Aimo admin sign-in dialog, and the pages: Order, My orders, Review queue, Customers, Audit trail, Explore |
+| `index.html` | Buyer-first landing page and sign-in, the pages Order, My orders and Explore, and the approval dialog for orders outside the agent's authority |
 | `app.js` | Page logic, API calls and sign-in dialog behavior |
 | `charts.js` | Ranked bar list (selected option emphasised, tooltips, keyboard support), status chips |
 | `dom.js` | Safe DOM builder (text only through `textContent`) and formatting helpers |
