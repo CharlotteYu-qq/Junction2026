@@ -19,6 +19,7 @@ The site opens on a buyer-focused landing page where buyers sign in. Locally, wi
 
 | Page | What it shows |
 |---|---|
+| **Home** | The introduction. Signed out, it has the sign-in form; signed in, shortcuts to ordering, your orders and Explore. The logo always leads here |
 | **Order** | Talk to the ordering agent in plain words (English, Finnish or Swedish; typed or spoken). It asks for anything missing, checks live prices and stock, and shows ranked options with its recommendation. You choose an option and click **Place order**; outside the agent's authority, a dialog asks a person to approve by typing their full name |
 | **My orders** | Your orders: placed within the agent's authority, approved by a named person, or cancelled. A placed order can be cancelled until the order cut-off of its delivery |
 | **Explore** | Search and filter aggregate product-group insights; product and supplier records, prices, customers and orders are not exposed |

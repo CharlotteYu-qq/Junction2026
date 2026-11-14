@@ -14,7 +14,7 @@ Plain HTML/CSS/JS modules, with no build step. FastAPI serves them at `/`.
 
 | File | What it does |
 |---|---|
-| `index.html` | Buyer-first landing page and sign-in, the pages Order, My orders and Explore, and the approval dialog for orders outside the agent's authority |
+| `index.html` | The pages Home (introduction, with sign-in when signed out), Order, My orders and Explore, and the approval dialog for orders outside the agent's authority. The page is in the address (`#order`, ...), so a refresh stays on it; no hash means Home |
 | `app.js` | Page logic, API calls, the conversation with the agent and sign-in behaviour |
 | `charts.js` | Ranked bar charts (selected option emphasised, tooltips, keyboard support), status chips |
 | `dom.js` | Safe DOM builder (text only through `textContent`) and formatting helpers |

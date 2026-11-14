@@ -86,15 +86,18 @@ function checkItem(c) {
 }
 
 // ====================================================================== status & navigation
-const PAGES = ['order', 'orders', 'explore'];
+const PAGES = ['home', 'order', 'orders', 'explore'];
 const ROLE_PAGES = { buyer: PAGES }; // the server checks the same role on every API call
 const loaders = { orders: loadMyOrders, explore: () => S.exploreLoaded || runExplore() };
 
+// The page comes from the address (#order, #orders, ...), so a refresh stays on it. Anything else, such as
+// no hash or an anchor on the home page (#get-started), shows the home page.
 function route() {
   if (!S.session?.signed_in) return;
   const allowed = ROLE_PAGES[S.session.role];
-  const page = allowed.includes(location.hash.slice(1)) ? location.hash.slice(1) : allowed[0];
-  $('#page-signin').hidden = true;
+  const page = allowed.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'home';
+  if (S.currentPage && S.currentPage !== page) window.scrollTo(0, 0); // a new page starts at the top
+  S.currentPage = page;
   for (const p of PAGES) $(`#page-${p}`).hidden = p !== page;
   document.querySelectorAll('.main-nav a').forEach((a) => {
     a.classList.toggle('is-active', a.dataset.page === page);
@@ -1405,10 +1408,12 @@ function renderSignIn(message = '') {
 
 function showSignIn(message = '') {
   S.session = { ...(S.session || {}), signed_in: false, role: null };
-  for (const p of PAGES) $(`#page-${p}`).hidden = true;
+  for (const p of PAGES) $(`#page-${p}`).hidden = p !== 'home';
   $('.main-nav').hidden = true;
   $('#session-box').hidden = true;
-  $('#page-signin').hidden = false;
+  $('#signin-buyer').hidden = false;
+  $('#home-welcome').hidden = true;
+  Object.assign($('#home-cta'), { href: '#signin-buyer', textContent: 'Get started' });
   hideTip();
   renderSignIn(message);
   api('/api/session').then((s) => { S.session = s; renderSignIn(message); }).catch(() => { /* keep the form */ });
@@ -1421,7 +1426,7 @@ async function signIn(form, body) {
   button.disabled = true;
   try {
     await api('/api/session/login', { method: 'POST', body });
-    history.replaceState(null, '', location.pathname); // start on the portal's first page
+    history.replaceState(null, '', `${location.pathname}#order`); // signing in is for ordering; Home is one click away
     location.reload();
   } catch (e) {
     error.textContent = e.message;
@@ -1453,6 +1458,12 @@ function showPortal() {
   $('#session-box').hidden = false;
   document.querySelectorAll('.main-nav a').forEach((a) => { a.hidden = !a.dataset.roles.split(' ').includes(s.role); });
   $('.main-nav').hidden = false;
+  // Home for a signed-in buyer: the same introduction, with shortcuts instead of the sign-in form.
+  $('#signin-buyer').hidden = true;
+  $('#signin-status').hidden = true;
+  $('#home-welcome-name').textContent = s.name;
+  $('#home-welcome').hidden = false;
+  Object.assign($('#home-cta'), { href: '#order', textContent: 'Start an order' });
 }
 
 async function init() {
