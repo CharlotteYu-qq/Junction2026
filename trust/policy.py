@@ -8,6 +8,7 @@ Severity says what a failed check means:
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from contracts.models import Candidate, Check, Constraints, Customer, Decision, Offer, OrderLine
@@ -74,9 +75,9 @@ def constraint_check(p: dict, c: Constraints, customer: Customer | None = None) 
         if st in ("contains", "may_contain"):
             ok, hard = False, True
             notes.append(f"{'contains' if st == 'contains' else 'may contain'} {name}")
-        elif st == "unknown":
+        elif st in ("unknown", "not_declared"):
             ok = False
-            notes.append(f"no allergen data to confirm it is free from {name}")
+            notes.append(f"no explicit allergen evidence to confirm it is free from {name}")
     for label in c.required_labels:
         if label not in (p.get("labels") or []):
             ok = False
@@ -142,6 +143,14 @@ def evaluate(
         "block",
         "Offer signature verified (Ed25519): prices and stock data are unchanged" if integrity_ok else "Offer signature does not match: the data was changed",
     )
+    if offer.parsed.clarification_required:
+        add("REQUEST_CLARIFICATION", False, "block", "Clarify the request before ordering: " + "; ".join(offer.parsed.warnings))
+    if offer.parsed.delivery_date_assumed:
+        add("DELIVERY_DATE", False, "block", "Confirm the delivery date before ordering; the current date was assumed")
+    elif offer.parsed.delivery_date < now.date():
+        add("DELIVERY_DATE", False, "block", "The requested delivery date is in the past; request a new offer")
+    if not selections.keys() <= set(range(len(offer.items))):
+        add("SELECTION", False, "block", "One or more selected lines are not part of this offer")
 
     # -- each line
     lines: list[OrderLine] = []
@@ -151,55 +160,64 @@ def evaluate(
         label = req.product_query or req.text
         pid = selections.get(idx) or item.recommended_product_id
         if not pid:
-            add("LINE_OPTION", False, "review", f"No orderable option was found for “{label}”: a person should look for an alternative")
+            add("LINE_OPTION", False, "block", f"No orderable option was found for “{label}”: revise the request or find a valid alternative")
             continue
         cand = next((c for c in item.candidates if c.product_id == pid), None)
         if cand is None:
             add("LINE_OPTION", False, "block", f"Product {pid} is not part of this offer")
             continue
         short = _short(cand.name)
-        if cand.quantity is None:
-            add("QUANTITY", False, "review", f"How much “{label}” is needed is unclear: add a quantity")
+        if (req.quantity is None or not math.isfinite(req.quantity) or req.quantity <= 0
+                or req.unit is None or req.assumption):
+            add("REQUEST_QUANTITY", False, "block", f"Confirm a positive quantity and unit for “{label}” before ordering")
+        if cand.quantity is None or not math.isfinite(cand.quantity) or cand.quantity <= 0:
+            add("QUANTITY", False, "block", f"How much “{label}” is needed is unclear: add a positive quantity and unit")
             continue
-        if cand.price.unit_price is None or cand.line_total is None:
-            add("PRICE", False, "review", f"No price was found for {short}")
+        if (cand.price.error or cand.price.unit_price is None or cand.line_total is None
+                or not math.isfinite(cand.price.unit_price) or not math.isfinite(cand.line_total)
+                or cand.price.unit_price < 0 or cand.line_total < 0):
+            add("PRICE", False, "block", f"No valid price was found for {short}")
             continue
 
         a = cand.availability
         unit = SALES_UNITS.get(cand.sales_unit, cand.sales_unit)
         req_date = offer.parsed.delivery_date
-        if a.status == "ok":
+        if a.closing_time and a.closing_time < now:
+            add("AVAILABILITY", False, "block", f"{short}: the order cut-off has passed; request a new offer")
+        elif a.status == "ok":
             extra = " (supplier stock: Valio Aimo can't see the actual quantity)" if a.logistic_model == "Terminal" else ""
             add("AVAILABILITY", True, "review", f"{short}: can be delivered on {req_date:%a %d %b}{extra}")
         elif a.status == "partial":
-            add("AVAILABILITY", False, "review", f"{short}: only {a.available_amount:,.0f} {unit} available, {cand.quantity:,.0f} needed")
+            amount = f"{a.available_amount:,.0f}" if a.available_amount is not None else "unknown"
+            add("AVAILABILITY", False, "block", f"{short}: only {amount} {unit} available, {cand.quantity:,.0f} needed; revise the quantity")
         elif a.status == "late":
             when = f"{a.available_date:%a %d %b}" if a.available_date else "unknown"
-            add("AVAILABILITY", False, "review", f"{short}: earliest delivery {when}, after the requested {req_date:%a %d %b}")
+            add("AVAILABILITY", False, "block", f"{short}: earliest delivery {when}, after the requested {req_date:%a %d %b}; confirm a new date")
         elif a.status == "cutoff_passed":
             when = f"{a.closing_time:%a %d %b %H:%M}" if a.closing_time else "?"
-            add("AVAILABILITY", False, "review", f"{short}: the order cut-off ({when}) for {req_date:%a %d %b} has passed")
+            add("AVAILABILITY", False, "block", f"{short}: the order cut-off ({when}) for {req_date:%a %d %b} has passed")
         elif a.status == "unavailable":
             add("AVAILABILITY", False, "block", f"{short}: cannot be ordered right now ({a.note or 'no delivery date'})")
         else:
-            add("AVAILABILITY", False, "review", f"{short}: availability could not be checked")
+            add("AVAILABILITY", False, "block", f"{short}: availability could not be checked; refresh the offer")
 
         is_recommended = pid == item.recommended_product_id
         if not cand.meets_constraints:
-            add("PREFERENCES", False, "review", f"{short} is a substitute that doesn't fully match the request: {', '.join(cand.constraint_notes)}")
+            severity = "review" if offer.parsed.substitution_allowed else "block"
+            add("PREFERENCES", False, severity, f"{short} is a substitute that doesn't fully match the request: {', '.join(cand.constraint_notes)}")
         elif not is_recommended:
             add("PREFERENCES", True, "review", f"{short} was chosen instead of the recommended option and still matches the request")
         else:
             add("PREFERENCES", True, "review", f"{short} matches the request")
 
-        for code in customer.strict_allergens:
+        for code in dict.fromkeys([*customer.strict_allergens, *req.constraints.free_from_allergens]):
             st = allergen_status(_candidate_facts(cand), code)
             name = ALLERGENS.get(code, code)
             if st in ("contains", "may_contain"):
                 verb = "contains" if st == "contains" else "may contain"
                 add("ALLERGEN_SAFETY", False, "block", f"{short} {verb} {name}, which is never allowed for {customer.name}")
-            elif st == "unknown":
-                add("ALLERGEN_SAFETY", False, "review", f"{short} has no allergen data: a person must confirm it is free from {name}")
+            elif st in ("unknown", "not_declared"):
+                add("ALLERGEN_SAFETY", False, "block", f"{short} has no explicit evidence that it is free from {name}; obtain evidence and request a new offer")
             else:
                 add("ALLERGEN_SAFETY", True, "block", f"{short}: {'declared free from' if st == 'free' else 'not declared to contain'} {name}")
 
@@ -227,9 +245,15 @@ def evaluate(
     total = round(total, 2)
     if not lines:
         if any(item.candidates for item in offer.items):
-            add("LINES", False, "review", "Nothing can be ordered until the missing details are added")
+            add("LINES", False, "block", "Nothing can be ordered until the missing details are added")
         else:
             add("LINES", False, "block", "No matching products were found")
+
+    if offer.parsed.budget_eur is not None:
+        budget = offer.parsed.budget_eur
+        add("BUYER_BUDGET", total <= budget, "block",
+            f"Total {eur(total)} is within the buyer's budget of {eur(budget)}"
+            if total <= budget else f"Total {eur(total)} exceeds the buyer's budget of {eur(budget)}; revise the request")
 
     # -- authority: how much may be spent without a person
     limit = customer.auto_approve_limit

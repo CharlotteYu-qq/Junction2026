@@ -13,6 +13,17 @@ const S = {
   expanded: {},
   rationale: null, // set once the person edits it
   submitted: null,
+  dirty: false,
+  requestChanged: false,
+  editVersion: 0,
+  requestVersion: 0,
+  requestPending: false,
+  evaluationVersion: 0,
+  evaluationPending: false,
+  evaluationError: null,
+  submissionPending: false,
+  submitError: null,
+  reviewPending: new Set(),
   explore: { filters: new Set(), category: '' },
 };
 
@@ -131,6 +142,52 @@ function setStatus(text, bad = false) {
   el.classList.toggle('bad', bad);
 }
 
+function orderStateMessage() {
+  if (S.submissionPending) return 'Submitting this order…';
+  if (S.requestPending) return 'Checking the request. The previous offer cannot be submitted.';
+  if (S.dirty) return S.requestChanged
+    ? 'The request or customer changed. Find a new option before ordering.'
+    : 'Details changed. Re-run with these details before ordering.';
+  if (S.evaluationPending) return 'Checking the selected option. Wait before ordering.';
+  if (S.evaluationError) return 'The selected option could not be checked. Select an option again to retry.';
+  if (S.offer && new Date(S.offer.valid_until) <= new Date()) return 'Offer expired. Re-run to check current prices and availability.';
+  if (S.offer?.parsed.delivery_date_assumed) return 'Confirm the delivery date by re-running with these details.';
+  if (S.offer?.parsed.clarification_required) return 'The request needs clarification. Correct the request and find a new option.';
+  return '';
+}
+
+function updateOrderControls() {
+  const run = $('#run-btn');
+  run.disabled = S.requestPending || S.submissionPending;
+  run.classList.toggle('is-busy', S.requestPending);
+  $('#request-text').disabled = S.submissionPending;
+  $('#customer').disabled = S.submissionPending;
+  $('#reset-demo').disabled = S.requestPending || S.submissionPending;
+  const rationale = $('#rationale');
+  if (rationale) rationale.disabled = S.submissionPending;
+  document.querySelectorAll('#examples button').forEach((b) => { b.disabled = S.requestPending || S.submissionPending; });
+  document.querySelectorAll('#understood input, #understood select, #understood button').forEach((el) => { el.disabled = S.requestPending || S.submissionPending || Boolean(S.submitted); });
+  const rerun = $('#rerun-details');
+  if (rerun) rerun.disabled = S.requestPending || S.submissionPending || Boolean(S.submitted) || S.requestChanged || !S.edit?.items.length;
+  const state = $('#offer-state');
+  if (state) {
+    state.textContent = orderStateMessage();
+    state.hidden = !state.textContent || Boolean(S.submitted);
+  }
+}
+
+function markDirty(requestChanged = false) {
+  S.editVersion += 1;
+  S.dirty = true;
+  S.requestChanged ||= requestChanged;
+  S.evaluationVersion += 1;
+  S.evaluationPending = false;
+  S.evaluationError = null;
+  S.submitError = null;
+  if (S.offer) rerenderDecision();
+  updateOrderControls();
+}
+
 function currentCustomer() {
   return S.customers.find((c) => c.id === $('#customer').value) || S.customers[0];
 }
@@ -161,22 +218,37 @@ function renderExamples() {
         $('#customer').value = ex.customer;
         storage.set('aimo.customer', ex.customer);
         renderTrustCard();
+        markDirty(true);
         runRequest();
       },
     })));
 }
 
 async function runRequest(override = null) {
+  if (S.requestPending || S.submissionPending) return;
   const text = $('#request-text').value.trim();
   if (!text) { setStatus('Write what you need first.', true); $('#request-text').focus(); return; }
-  const btn = $('#run-btn');
-  btn.disabled = true;
-  btn.classList.add('is-busy');
+  const customerId = $('#customer').value;
+  const version = ++S.requestVersion;
+  const editVersion = S.editVersion;
+  S.requestPending = true;
+  S.dirty = true;
+  S.evaluationVersion += 1;
+  S.evaluationPending = false;
+  S.evaluationError = null;
+  S.submitError = null;
+  updateOrderControls();
+  if (S.offer) rerenderDecision();
   $('#results').classList.add('is-refreshing');
   setStatus(override ? 'Re-checking with your corrections…' : 'Understanding the request and checking prices and availability with Valio Aimo…');
   try {
-    const res = await api('/api/requests', { method: 'POST', body: { customer_id: $('#customer').value, text, override } });
-    Object.assign(S, { offer: res.offer, decision: res.decision, selections: {}, sort: {}, expanded: {}, rationale: null, submitted: null });
+    const res = await api('/api/requests', { method: 'POST', body: { customer_id: customerId, text, override } });
+    if (version !== S.requestVersion) return;
+    if (editVersion !== S.editVersion || text !== $('#request-text').value.trim() || customerId !== $('#customer').value) {
+      setStatus('The request changed while it was being checked. Find a new option.', true);
+      return;
+    }
+    Object.assign(S, { offer: res.offer, decision: res.decision, selections: {}, sort: {}, expanded: {}, rationale: null, submitted: null, dirty: false, requestChanged: false });
     S.edit = structuredClone(res.offer.parsed);
     const idx = S.customers.findIndex((c) => c.id === res.customer.id);
     if (idx >= 0) S.customers[idx] = res.customer;
@@ -184,11 +256,14 @@ async function runRequest(override = null) {
     renderResults();
     if (!override) $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
-    setStatus(e.message, true);
+    if (version === S.requestVersion) setStatus(e.message, true);
   } finally {
-    btn.disabled = false;
-    btn.classList.remove('is-busy');
-    $('#results').classList.remove('is-refreshing');
+    if (version === S.requestVersion) {
+      S.requestPending = false;
+      $('#results').classList.remove('is-refreshing');
+      if (S.offer) rerenderDecision();
+      updateOrderControls();
+    }
   }
 }
 
@@ -207,44 +282,53 @@ function renderResults() {
 function understoodPanel() {
   const p = S.offer.parsed;
   const dateInput = h('input', { type: 'date', id: 'u-date', value: S.edit.delivery_date, min: localISO(new Date()) });
-  dateInput.addEventListener('change', () => { S.edit.delivery_date = dateInput.value; });
+  dateInput.addEventListener('change', () => { S.edit.delivery_date = dateInput.value; S.edit.delivery_date_assumed = false; markDirty(); });
+  const budgetInput = h('input', { type: 'number', id: 'u-budget', min: '0.01', step: '0.01', value: S.edit.budget_eur ?? '', placeholder: 'No cap' });
+  budgetInput.addEventListener('input', () => { S.edit.budget_eur = budgetInput.value === '' ? null : Number(budgetInput.value); markDirty(); });
+  const substitutes = h('input', { type: 'checkbox', id: 'u-substitutes', checked: S.edit.substitution_allowed !== false });
+  substitutes.addEventListener('change', () => { S.edit.substitution_allowed = substitutes.checked; markDirty(); });
   return h('section', { class: 'panel', id: 'understood' },
     h('div', { class: 'panel-head' },
       h('h3', { text: 'What the agent understood' }),
       h('span', { class: 'muted small', text: `${p.parser === 'claude' ? 'Claude' : 'Rule-based'} parser · correct anything that's wrong` })),
+    h('p', { id: 'offer-state', class: 'offer-state', role: 'status', hidden: !orderStateMessage(), text: orderStateMessage() }),
     h('div', { class: 'u-rows', id: 'u-rows' }, S.edit.items.map((it, i) => understoodRow(it, i))),
     S.edit.items.length ? null : h('p', { class: 'empty', text: 'No products recognised. Rephrase the request, e.g. “200 litres of lactose-free milk by Monday”.' }),
     h('div', { class: 'u-foot' },
       h('label', { class: 'field-inline', for: 'u-date' }, 'Delivery date', dateInput),
       p.delivery_date_assumed ? toneChip('warning', '!', 'Assumed: the request had no date') : null,
-      h('button', { class: 'btn btn-small', type: 'button', onClick: rerunWithEdits, text: 'Re-run with these details', disabled: !S.edit.items.length })),
+      h('button', { id: 'rerun-details', class: 'btn btn-small', type: 'button', onClick: rerunWithEdits, text: 'Re-run with these details', disabled: !S.edit.items.length })),
+    h('div', { class: 'u-controls' },
+      h('label', { class: 'field-inline', for: 'u-budget' }, 'Budget EUR, excl. VAT (optional)', budgetInput),
+      h('label', { class: 'check-inline', for: 'u-substitutes' }, substitutes, 'Allow substitutes outside requested preferences')),
+    p.clarification_required ? h('p', { class: 'offer-state', text: 'Some purchasing conditions could not be understood. Correct the request before ordering.' }) : null,
     p.warnings.length ? h('ul', { class: 'warnings' }, p.warnings.map((w) => h('li', { text: w }))) : null);
 }
 
 function understoodRow(it, i) {
   const product = h('input', { class: 'u-product', type: 'text', value: it.product_query, 'aria-label': `Product ${i + 1}` });
-  product.addEventListener('input', () => { S.edit.items[i].product_query = product.value; });
+  product.addEventListener('input', () => { S.edit.items[i].product_query = product.value; markDirty(); });
   const qty = h('input', { class: 'u-qty', type: 'number', min: '0', step: 'any', value: it.quantity ?? '', placeholder: 'Qty', 'aria-label': `Quantity ${i + 1}` });
-  qty.addEventListener('input', () => { S.edit.items[i].quantity = qty.value === '' ? null : Number(qty.value); });
+  qty.addEventListener('input', () => { S.edit.items[i].quantity = qty.value === '' ? null : Number(qty.value); markDirty(); });
   const unit = h('select', { class: 'u-unit', 'aria-label': `Unit ${i + 1}` },
+    h('option', { value: '', text: 'Choose unit' }),
     Object.entries(UNIT_TEXT).map(([v, label]) => h('option', { value: v, text: label })));
-  unit.value = it.unit || 'L';
-  unit.addEventListener('change', () => { S.edit.items[i].unit = unit.value; });
-  if (!it.unit) S.edit.items[i].unit = null;
+  unit.value = it.unit || '';
+  unit.addEventListener('change', () => { S.edit.items[i].unit = unit.value || null; markDirty(); });
 
   const add = h('select', { class: 'req-add', 'aria-label': `Add requirement to item ${i + 1}` },
     h('option', { value: '', text: '+ requirement' }),
     S.vocab.requirement_options.map((o, k) => h('option', { value: String(k), text: o.label })));
   add.addEventListener('change', () => {
     const o = S.vocab.requirement_options[Number(add.value)];
-    if (o) { addRequirement(S.edit.items[i].constraints, o); refreshRow(i); }
+    if (o) { addRequirement(S.edit.items[i].constraints, o); refreshRow(i); markDirty(); }
   });
   return h('div', { class: 'u-row', 'data-index': i },
     product, qty, unit,
     h('div', { class: 'u-reqs' },
       reqChips(it.constraints).map((rc) => h('span', { class: 'req-chip' }, rc.label,
         h('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${rc.label}`, text: '×',
-          onClick: () => { removeRequirement(S.edit.items[i].constraints, rc); refreshRow(i); } }))),
+          onClick: () => { removeRequirement(S.edit.items[i].constraints, rc); refreshRow(i); markDirty(); } }))),
       add),
     it.assumption ? h('p', { class: 'u-assumption', text: it.assumption }) : null);
 }
@@ -269,9 +353,27 @@ function removeRequirement(c, rc) {
 }
 
 function rerunWithEdits() {
+  if (S.requestPending || S.submissionPending || !S.offer || S.requestChanged) return;
+  const incomplete = S.edit.items.findIndex((it) => !it.product_query.trim() || !Number.isFinite(it.quantity) || it.quantity <= 0 || !it.unit);
+  if (incomplete >= 0) {
+    setStatus('Each item needs a product, a positive quantity and an explicit unit.', true);
+    $(`.u-row[data-index="${incomplete}"] input`)?.focus();
+    return;
+  }
+  if (!S.edit.delivery_date || S.edit.delivery_date < localISO(new Date())) {
+    setStatus('Choose a delivery date today or later.', true);
+    $('#u-date').focus();
+    return;
+  }
+  if (S.edit.budget_eur != null && (!Number.isFinite(S.edit.budget_eur) || S.edit.budget_eur <= 0)) {
+    setStatus('Enter a positive budget in EUR, or leave the budget empty.', true);
+    $('#u-budget').focus();
+    return;
+  }
   const original = S.offer.parsed.items;
   const override = {
     ...S.edit,
+    delivery_date_assumed: false,
     items: S.edit.items.map((it, i) => {
       const changed = it.product_query.trim() !== (original[i]?.product_query || '');
       const hasQty = it.quantity != null && it.quantity > 0;
@@ -281,7 +383,7 @@ function rerunWithEdits() {
         search_phrases: changed ? [it.product_query.trim()] : it.search_phrases,
         exclude_words: changed ? [] : it.exclude_words,
         quantity: hasQty ? it.quantity : null,
-        unit: hasQty ? (it.unit || 'L') : null,
+        unit: hasQty ? it.unit : null,
         assumption: '',
       };
     }).filter((it) => it.product_query),
@@ -430,17 +532,35 @@ function rerenderItem(i, focusSelected = false) {
 }
 
 async function selectCandidate(i, pid) {
-  if (S.submitted) return;
+  if (S.submitted || S.submissionPending || S.requestPending || S.dirty) return;
+  const offerId = S.offer.id;
+  const version = ++S.evaluationVersion;
   S.selections[i] = pid;
+  const selections = { ...S.selections };
+  S.evaluationPending = true;
+  S.evaluationError = null;
+  S.submitError = null;
+  S.decision = null;
+  S.rationale = null;
   rerenderItem(i, true);
-  const panel = $('#decision');
-  panel?.classList.add('is-refreshing');
-  try {
-    S.decision = await api(`/api/offers/${S.offer.id}/evaluate`, { method: 'POST', body: { selections: S.selections } });
-  } catch (e) {
-    setStatus(e.message, true);
-  }
   rerenderDecision();
+  updateOrderControls();
+  try {
+    const decision = await api(`/api/offers/${offerId}/evaluate`, { method: 'POST', body: { selections } });
+    if (version !== S.evaluationVersion || S.offer?.id !== offerId || S.dirty || S.requestPending) return;
+    S.decision = decision;
+  } catch (e) {
+    if (version === S.evaluationVersion && S.offer?.id === offerId) {
+      S.evaluationError = e.message;
+      setStatus(e.message, true);
+    }
+  } finally {
+    if (version === S.evaluationVersion && S.offer?.id === offerId) {
+      S.evaluationPending = false;
+      rerenderDecision();
+      updateOrderControls();
+    }
+  }
 }
 
 // ---------------------------------------------------------------------- decision
@@ -478,17 +598,18 @@ function decisionPanel() {
   const d = S.decision;
   const o = S.offer;
   const lines = orderLines();
-  const out = OUTCOMES[d.outcome];
-  const failing = d.checks.filter((c) => !c.passed && c.severity !== 'info');
-  const notes = d.checks.filter((c) => !c.passed && c.severity === 'info');
-  const passed = d.checks.filter((c) => c.passed);
+  const out = d ? OUTCOMES[d.outcome] : { tone: 'warning', icon: '!', title: 'Decision unavailable', button: 'Check selection first' };
+  const checks = d?.checks || [];
+  const failing = checks.filter((c) => !c.passed && c.severity !== 'info');
+  const notes = checks.filter((c) => !c.passed && c.severity === 'info');
+  const passed = checks.filter((c) => c.passed);
   return h('section', { class: 'panel decision-panel', id: 'decision' },
     h('div', { class: 'stat-label', text: 'Order total, excl. VAT' }),
-    h('div', { class: 'hero-figure', text: fmt.eur(d.total) }),
+    h('div', { class: 'hero-figure', text: fmt.eur(d?.total ?? lines.reduce((total, l) => total + l.c.line_total, 0)) }),
     h('div', { class: 'muted small', text: `${lines.length} ${plural('line', lines.length)} · delivery ${fmt.day(o.parsed.delivery_date)} · ordering as ${currentCustomerName(o.customer_id)}` }),
     h('div', { class: `outcome tone-${out.tone}` },
       h('span', { class: 'outcome-icon', 'aria-hidden': 'true', text: out.icon }),
-      h('div', {}, h('strong', { text: out.title }), h('span', { text: d.summary }))),
+      h('div', {}, h('strong', { text: out.title }), h('span', { text: d?.summary || orderStateMessage() }))),
     checkGroup('Needs attention', failing),
     checkGroup('Notes', notes),
     checkGroup(`Passed checks (${passed.length})`, passed, true),
@@ -505,14 +626,18 @@ function submitBlock(lines, out, d) {
   const area = h('textarea', { id: 'rationale', rows: '4', 'aria-describedby': 'rationale-hint' });
   area.value = S.rationale ?? defaultRationale();
   area.addEventListener('input', () => { S.rationale = area.value; });
-  const blocked = d.outcome === 'reject' || lines.length === 0;
+  const stateMessage = orderStateMessage();
+  const blocked = !d || d.outcome === 'reject' || lines.length === 0 || Boolean(stateMessage);
   return h('div', { class: 'submit-block' },
+    stateMessage ? h('p', { class: 'offer-state', role: 'status', text: stateMessage }) : null,
+    S.evaluationError ? h('p', { class: 'bad small', role: 'alert', text: S.evaluationError }) : null,
+    S.submitError ? h('p', { class: 'bad small', role: 'alert', text: S.submitError }) : null,
     h('label', { for: 'rationale', text: 'Rationale (saved to the audit trail)' }),
     area,
     h('span', { id: 'rationale-hint', class: 'hint muted', text: 'Written by the agent from the data above. Edit it if you chose differently.' }),
     h('button', {
       class: 'btn btn-primary', type: 'button', id: 'submit-order', disabled: blocked,
-      text: lines.length === 0 ? 'Add the missing details first' : out.button,
+      text: S.submissionPending ? 'Submitting…' : lines.length === 0 ? 'Add the missing details first' : out.button,
       onClick: () => submitOrder(area.value),
     }));
 }
@@ -540,28 +665,44 @@ function rerenderDecision() {
 }
 
 async function submitOrder(rationale) {
-  const btn = $('#submit-order');
-  btn.disabled = true;
-  btn.classList.add('is-busy');
+  const blocked = orderStateMessage();
+  if (!S.offer || S.submitted || !S.decision || blocked || S.decision.outcome === 'reject' || !orderLines().length) {
+    if (blocked) { setStatus(blocked, true); if (S.offer) rerenderDecision(); updateOrderControls(); }
+    return;
+  }
+  const offerId = S.offer.id;
+  const selections = { ...S.selections };
+  S.submissionPending = true;
+  S.submitError = null;
+  rerenderDecision();
+  updateOrderControls();
   try {
-    S.submitted = await api('/api/orders', { method: 'POST', body: { offer_id: S.offer.id, selections: S.selections, rationale } });
-    rerenderDecision();
+    S.submitted = await api('/api/orders', { method: 'POST', body: { offer_id: offerId, selections, rationale } });
     refreshReviewCount();
-    const fresh = await api('/api/customers');
-    S.customers = fresh;
   } catch (e) {
+    S.submitError = e.message;
     setStatus(e.message, true);
-    btn.disabled = false;
-    btn.classList.remove('is-busy');
+  } finally {
+    S.submissionPending = false;
+    rerenderDecision();
+    updateOrderControls();
+  }
+  if (S.submitted) {
+    try { S.customers = await api('/api/customers'); renderTrustCard(); } catch { /* Order confirmation is already authoritative. */ }
   }
 }
 
 function newRequest() {
-  Object.assign(S, { offer: null, decision: null, submitted: null, selections: {}, sort: {}, rationale: null });
+  if (S.submissionPending) return;
+  S.requestVersion += 1;
+  S.evaluationVersion += 1;
+  Object.assign(S, { offer: null, decision: null, edit: null, submitted: null, selections: {}, sort: {}, rationale: null, dirty: false, requestChanged: false, requestPending: false, evaluationPending: false, evaluationError: null, submitError: null });
   $('#results').hidden = true;
   $('#results').replaceChildren();
   $('#request-text').value = '';
   renderCustomerSelect();
+  setStatus('');
+  updateOrderControls();
   window.scrollTo({ top: 0, behavior: 'smooth' });
   $('#request-text').focus();
 }
@@ -607,9 +748,11 @@ function reviewCard(o) {
   const notes = o.decision.checks.filter((ch) => !ch.passed && ch.severity === 'info');
   const expired = o.offer_valid_until && new Date(o.offer_valid_until) < new Date();
   const verify = c?.status === 'unverified' && c.business_id_valid
-    ? h('input', { type: 'checkbox', checked: true, id: `verify-${o.id}` }) : null;
+    ? h('input', { type: 'checkbox', id: `verify-${o.id}` }) : null;
   const comment = h('input', { type: 'text', placeholder: 'Comment (optional, saved to the audit trail)', 'aria-label': `Comment on ${o.id}`, maxlength: '500' });
-  return h('article', { class: 'panel review-card' },
+  const pending = S.reviewPending.has(o.id);
+  const hardBlocked = reasons.some((ch) => ch.severity === 'block');
+  return h('article', { class: 'panel review-card', 'data-order-id': o.id },
     h('div', { class: 'review-head' },
       h('div', {}, h('h3', { text: `${o.id} · ${o.customer_name}` }), h('div', { class: 'muted small', text: `Created ${fmt.dateTime(o.created_at)} · offer ${o.offer_id}` })),
       h('div', { class: 'review-total' }, h('div', { class: 'stat-label', text: 'Total excl. VAT' }), h('div', { class: 'stat-value', text: fmt.eur(o.total) }))),
@@ -624,21 +767,40 @@ function reviewCard(o) {
     h('div', { class: 'review-actions' },
       verify ? h('label', { class: 'check-inline', for: `verify-${o.id}` }, verify, `Also verify ${c.name} and add it to the whitelist`) : null,
       comment,
-      h('button', { class: 'btn btn-primary btn-small', type: 'button', text: 'Approve', onClick: () => decide(o, 'approve', comment.value, verify?.checked) }),
-      h('button', { class: 'btn btn-small', type: 'button', text: 'Reject', onClick: () => decide(o, 'reject', comment.value, false) })));
+      h('button', { class: 'btn btn-primary btn-small', type: 'button', text: 'Approve', disabled: pending || expired || hardBlocked, onClick: () => decide(o, 'approve', comment.value, verify?.checked) }),
+      h('button', { class: 'btn btn-small', type: 'button', text: 'Reject', disabled: pending, onClick: () => decide(o, 'reject', comment.value, false) })),
+    expired ? h('p', { class: 'offer-state', text: 'This offer expired. Reject it and request a fresh offer before approving.' }) : null,
+    h('p', { class: 'review-error bad small', role: 'alert', hidden: true }));
 }
 
 async function decide(order, decision, comment, verifyCustomer) {
+  if (S.reviewPending.has(order.id)) return;
   const reviewer = $('#reviewer').value.trim();
   if (!reviewer) { $('#reviewer').focus(); $('#reviewer').placeholder = 'Enter your name first'; return; }
+  if (decision === 'approve' && ((order.offer_valid_until && new Date(order.offer_valid_until) <= new Date()) || order.decision.checks.some((ch) => !ch.passed && ch.severity === 'block'))) {
+    await loadReview();
+    return;
+  }
   storage.set('aimo.reviewer', reviewer);
+  S.reviewPending.add(order.id);
+  const card = document.querySelector(`.review-card[data-order-id="${CSS.escape(order.id)}"]`);
+  const controls = [...(card?.querySelectorAll('button, input') || [])];
+  const disabledBefore = controls.map((el) => el.disabled);
+  controls.forEach((el) => { el.disabled = true; });
+  card?.setAttribute('aria-busy', 'true');
+  const error = card?.querySelector('.review-error');
+  if (error) error.hidden = true;
   try {
     await api(`/api/orders/${order.id}/decision`, { method: 'POST', body: { decision, reviewer, comment, verify_customer: Boolean(verifyCustomer) } });
-    S.customers = await api('/api/customers');
-    renderCustomerSelect();
-    loadReview();
+    try { S.customers = await api('/api/customers'); renderCustomerSelect(); } catch { /* Decision was saved; still refresh the queue. */ }
+    await loadReview();
   } catch (e) {
-    alert(e.message);
+    if (error) { error.textContent = e.message; error.hidden = false; }
+    else alert(e.message);
+  } finally {
+    S.reviewPending.delete(order.id);
+    controls.forEach((el, i) => { el.disabled = disabledBefore[i]; });
+    card?.removeAttribute('aria-busy');
   }
 }
 
@@ -844,7 +1006,8 @@ async function init() {
   initRegisterForm();
   $('#explore-date').value = nextWeekday();
 
-  $('#customer').addEventListener('change', () => { storage.set('aimo.customer', $('#customer').value); renderTrustCard(); });
+  $('#customer').addEventListener('change', () => { storage.set('aimo.customer', $('#customer').value); renderTrustCard(); markDirty(true); });
+  $('#request-text').addEventListener('input', () => markDirty(true));
   $('#request-form').addEventListener('submit', (e) => { e.preventDefault(); runRequest(); });
   $('#request-text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runRequest(); });
   $('#explore-form').addEventListener('submit', (e) => { e.preventDefault(); S.explore.category = ''; runExplore(); });
@@ -860,6 +1023,7 @@ async function init() {
   window.addEventListener('hashchange', route);
   window.addEventListener('scroll', hideTip, { passive: true });
   route();
+  updateOrderControls();
   loadHealth();
   refreshReviewCount();
 }

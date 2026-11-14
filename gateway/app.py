@@ -168,7 +168,16 @@ def well_known():
             "algorithm": "Ed25519",
             "public_key_base64": S.signer.public_key_b64(),
             "signed_message": "content_hash (hex), where content_hash = SHA-256 of the offer's canonical JSON "
-            "(sorted keys, compact separators) without the content_hash and signature fields",
+            "(sorted keys, compact separators, UTF-8 without ASCII escaping) without the content_hash and signature fields; "
+            "sign the UTF-8 bytes of the hexadecimal hash",
+        },
+        "audit_hashing": {
+            "algorithm": "SHA-256",
+            "genesis": "0" * 64,
+            "message": "UTF-8 bytes of prev_hash followed by canonical JSON of the event excluding hash; "
+            "prev_hash is included in that JSON. Canonical JSON uses sorted keys, compact separators and UTF-8 "
+            "without ASCII escaping. Normalize ts to ISO 8601 with seconds and an explicit offset (+00:00 for Z).",
+            "limit": "A hash chain needs an independently saved checkpoint to detect complete history rewrites.",
         },
         "data_boundary": [
             "Only curated product data, customer-specific prices and availability are exposed",
@@ -244,7 +253,8 @@ async def create_request(body: RequestIn):
     text = body.text.strip()
     if body.override:
         parsed, parse_ms = body.override, 0
-        parsed.warnings = []
+        if not parsed.clarification_required:
+            parsed.warnings = []
         parsed.delivery_date_assumed = False
         S.audit.append(f"customer:{customer.id}", "request.edited", customer.id,
                        f"{customer.name} corrected the request: " + "; ".join(describe_item(i) for i in parsed.items))
@@ -369,8 +379,21 @@ def decide_order(order_id: str, body: DecisionIn):
     customer = _customer(order.customer_id)
     reviewer = body.reviewer.strip()
     comment = body.comment.strip()
-    order.reviewer, order.reviewed_at, order.review_comment = reviewer, datetime.now(TZ), comment or None
+    if not reviewer:
+        raise HTTPException(400, "Enter the reviewer's name")
+    now = datetime.now(TZ)
     if body.decision == "approve":
+        # Approval grants authority; it cannot waive hard rules or revive an expired offer.
+        offer = _offer(order.offer_id)
+        selections = {line.item_index: line.product_id for line in order.lines}
+        decision, lines = evaluate(customer, offer, selections, now, verify_offer(offer, S.signer))
+        if decision.outcome == "reject":
+            S.audit.append(f"human:{reviewer}", "order.approval_blocked", order.id,
+                           f"Approval of {order.id} blocked: {decision.summary}")
+            raise HTTPException(409, decision.summary)
+        old_lines = [line.model_dump(mode="json") for line in order.lines]
+        if decision.total != order.total or [line.model_dump(mode="json") for line in lines] != old_lines:
+            raise HTTPException(409, "The order changed since review; request a new offer and approval")
         if body.verify_customer and customer.status == "unverified":
             if not customer.business_id_valid:
                 raise HTTPException(400, "The business ID fails the checksum: can't add this customer to the whitelist")
@@ -378,6 +401,7 @@ def decide_order(order_id: str, body: DecisionIn):
             S.audit.append(f"human:{reviewer}", "customer.whitelisted", customer.id,
                            f"{reviewer} verified {customer.name} and added it to the whitelist (auto-approval limit €{customer.auto_approve_limit:,.0f})")
         order.status = "placed"
+        order.decision = decision
         S.customers.record_order(customer.id, order.total)
         S.audit.append(f"human:{reviewer}", "order.approved", order.id,
                        f"{reviewer} approved {order.id} for {customer.name} ({eur(order.total)})" + (f": “{_clip(comment, 120)}”" if comment else ""),
@@ -387,6 +411,7 @@ def decide_order(order_id: str, body: DecisionIn):
         S.audit.append(f"human:{reviewer}", "order.rejected_by_person", order.id,
                        f"{reviewer} rejected {order.id} for {customer.name}" + (f": “{_clip(comment, 120)}”" if comment else ""),
                        {"comment": comment})
+    order.reviewer, order.reviewed_at, order.review_comment = reviewer, now, comment or None
     S.store.save_order(order)
     return _order_out(order)
 
