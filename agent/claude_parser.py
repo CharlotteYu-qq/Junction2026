@@ -2,7 +2,8 @@
 
 Claude returns JSON that matches SCHEMA (structured outputs), so the result is always machine-
 readable. Any failure falls back to the rule-based parser - the demo never depends on it.
-Server-side refusal fallbacks are enabled (`fallbacks="default"`), as recommended for this model.
+Server-side refusal fallbacks (`fallbacks="default"`) are enabled for the models that support them;
+Claude Haiku 5.5 has none, so a refusal there falls back to the rule-based parser.
 """
 from __future__ import annotations
 
@@ -11,6 +12,9 @@ from datetime import date
 
 from contracts.models import Constraints, ParsedRequest, RequestItem
 from contracts.vocab import ALLERGENS, CLAIMS, LABELS
+
+# Models that accept the server-side refusal fallback; others (e.g. claude-haiku-5-5) must not send it.
+SERVER_FALLBACK_MODELS = {"claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
 
 SCHEMA = {
     "type": "object",
@@ -86,11 +90,14 @@ async def parse(text: str, today: date, model: str) -> ParsedRequest:
     import anthropic  # optional dependency
 
     client = anthropic.AsyncAnthropic()
+    fallback = (
+        {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+        if model in SERVER_FALLBACK_MODELS else {}
+    )
     response = await client.beta.messages.create(
         model=model,
         max_tokens=16000,
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
+        **fallback,
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
         system=SYSTEM.format(today=today.isoformat(), weekday=today.strftime("%A")),
         messages=[{"role": "user", "content": text}],
