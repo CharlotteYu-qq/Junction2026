@@ -22,7 +22,7 @@ class ValioClient:
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(base_url=self.base_url, headers={"X-API-Key": api_key}, timeout=25.0)
-        self._cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
+        self._cache: dict[tuple[str, str, str, str], tuple[float, dict]] = {}
         self.has_key = bool(api_key)
         self.calls = 0
 
@@ -65,7 +65,7 @@ class ValioClient:
         out: dict[str, dict] = {}
         missing: list[str] = []
         for pid in dict.fromkeys(ids):
-            hit = self._cache.get((kind, pid, day))
+            hit = self._cache.get((customer, kind, pid, day))
             if hit and hit[0] > now:
                 out[pid] = hit[1]
             else:
@@ -79,7 +79,7 @@ class ValioClient:
             for row in data.get("products", []):
                 pid = str(row.get("productId"))
                 out[pid] = row
-                self._cache[(kind, pid, day)] = (now + CACHE_SECONDS, row)
+                self._cache[(customer, kind, pid, day)] = (now + CACHE_SECONDS, row)
         return out, meta
 
     async def price(self, ids: list[str], requested: date, customer: str) -> tuple[dict, dict]:

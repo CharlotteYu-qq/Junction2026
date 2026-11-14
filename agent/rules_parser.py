@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import date, timedelta
 
@@ -89,7 +90,7 @@ _UNITS: list[tuple[str, str, float]] = [
     (r"cases?|boxes?|crates?|laatikkoa?|packs?|packages?|pakettia?|bottles?|pulloa?|cartons?|bags?|pussia?|sacks?|säkkiä|trays?", "SALES_UNIT", 1.0),
 ]
 _UNIT_ALT = "|".join(u for u, _, _ in _UNITS)
-_QTY_RE = re.compile(rf"(?P<qty>\d+(?:\.\d+)?)(?:\s*(?P<unit>{_UNIT_ALT})(?![a-zäöå]))?", re.I)
+_QTY_RE = re.compile(rf"(?P<qty>[+-]?\d+(?:\.\d+)?)(?:\s*(?P<unit>{_UNIT_ALT})(?![a-zäöå]))?", re.I)
 _SERVINGS_RE = re.compile(r"\b(?:for\s+)?(\d+)\s*(?:people|persons|pupils|students|guests|portions|servings|covers|henkilöä|hengelle|annosta|oppilaalle|oppilasta)\b", re.I)
 
 
@@ -107,6 +108,97 @@ def normalise_numbers(text: str) -> str:
         prev = text
         text = re.sub(r"(\d),(\d{3})(?!\d)", r"\1\2", text)  # 1,000 -> 1000
     return re.sub(r"(\d),(\d)", r"\1.\2", text)  # 2,5 -> 2.5
+
+
+# ----------------------------------------------------------------------------- order controls
+
+# Remove order controls before looking for product quantities. A monetary amount is
+# never an extra product, and an instruction forbidding a substitute is not an item.
+_CONTROL_TAIL = r".*?(?=\.(?!\d)|[!?;\n,]|\band\b(?=\s+(?:\d|budget\b|budjetti\b))|$)"
+_NO_SUBSTITUTION = re.compile(
+    rf"\b(?:(?:do\s+not|don't|never)\s+(?:substitut\w*|replace\w*)|"
+    rf"(?:no|without)\s+(?:substitutions?|substitutes?|replacements?)|"
+    rf"ei\s+(?:korvaavia\s+tuotteita|korvauksia)){_CONTROL_TAIL}", re.I,
+)
+_ALLOW_SUBSTITUTION = re.compile(r"\b(?:substitutions?|substitutes?|replacements?)\s+(?:are\s+)?(?:allowed|acceptable|ok)\b", re.I)
+_MONEY_TOKEN = r"(?:€|EUR\b|euros?\b|\$|USD\b|dollars?\b|£|GBP\b|pounds?\b|SEK\b|NOK\b|DKK\b)"
+_AMOUNT_TOKEN = r"[+-]?\d+(?:\.\d+)?"
+_MONEY = re.compile(
+    rf"(?:({_MONEY_TOKEN})\s*({_AMOUNT_TOKEN})|({_AMOUNT_TOKEN})\s*({_MONEY_TOKEN}))(?=\s|$)", re.I,
+)
+_UNPARSED_MONEY = re.compile(
+    rf"(?:{_MONEY_TOKEN}\s*{_AMOUNT_TOKEN}|{_AMOUNT_TOKEN}\s*{_MONEY_TOKEN})", re.I,
+)
+_BUDGET = re.compile(
+    rf"\b(?:(?:(?:maximum|max|total)\s+)?budget\b|budjetti\b|"
+    rf"spend\s+(?:no\s+more\s+than|at\s+most|up\s+to)|"
+    rf"(?:up\s+to|under|within|at\s+most|no\s+more\s+than)(?=\s+(?:{_MONEY_TOKEN}\s*{_AMOUNT_TOKEN}|{_AMOUNT_TOKEN}\s*{_MONEY_TOKEN}))){_CONTROL_TAIL}", re.I,
+)
+_UNSUPPORTED_NEGATION = re.compile(rf"\b(?:do\s+not|don't|must\s+not|never|no\s+(?!added\s+sugar\b))\b{_CONTROL_TAIL}", re.I)
+
+
+def extract_controls(text: str) -> tuple[str, float | None, bool, bool, list[str]]:
+    """Return product text, EUR cap, substitution permission, clarification flag and notes.
+
+    The deterministic fallback supports explicit EUR caps and a conservative no-
+    substitution switch. Unsupported controls stop ordering instead of disappearing.
+    """
+    warnings: list[str] = []
+    clarification = False
+    substitution_allowed = not bool(_NO_SUBSTITUTION.search(text))
+    allow_stated = bool(_ALLOW_SUBSTITUTION.search(text))
+    if not substitution_allowed and allow_stated:
+        clarification = True
+        warnings.append("Conflicting substitution instructions: please confirm whether substitutes are allowed")
+    work = _NO_SUBSTITUTION.sub(" ", text)
+    work = _ALLOW_SUBSTITUTION.sub(" ", work)
+    budgets: list[float] = []
+
+    def budget_clause(match: re.Match) -> str:
+        nonlocal clarification
+        clause = match.group(0).strip()
+        body = re.sub(
+            r"^(?:(?:maximum|max|total)\s+)?budget\b|^budjetti\b|"
+            r"^spend\s+(?:no\s+more\s+than|at\s+most|up\s+to)|"
+            r"^(?:up\s+to|under|within|at\s+most|no\s+more\s+than)", "", clause, flags=re.I,
+        )
+        body = re.sub(r"^\s*(?:(?:is|of|limit|maximum|max|on|under|within|up\s+to|at\s+most|for\s+the\s+order)\s+)*[:=]?\s*", "", body, flags=re.I)
+        money = _MONEY.match(body)
+        if not money:
+            clarification = True
+            warnings.append(f"Budget needs an explicit EUR amount: “{clause}”")
+            return " "
+        currency = (money.group(1) or money.group(4)).upper()
+        amount = float(money.group(2) or money.group(3))
+        if currency not in ("€", "EUR", "EURO", "EUROS"):
+            clarification = True
+            warnings.append(f"Only EUR budgets are supported; please clarify “{clause}”")
+            return " "
+        if not math.isfinite(amount) or amount <= 0:
+            clarification = True
+            warnings.append("Budget must be a positive, finite EUR amount")
+            return " "
+        budgets.append(amount)
+        suffix = body[money.end():].strip(" :")
+        if suffix and not re.fullmatch(r"(?:excl(?:uding)?\.?\s+VAT|before\s+VAT|and)", suffix, re.I):
+            clarification = True
+            warnings.append(f"Please clarify this budget condition (totals exclude VAT): “{clause}”")
+        return " "
+
+    work = _BUDGET.sub(budget_clause, work)
+    if len(set(budgets)) > 1:
+        clarification = True
+        warnings.append("Conflicting budget amounts: please confirm one maximum EUR total")
+    if _UNPARSED_MONEY.search(work):
+        clarification = True
+        warnings.append("A monetary condition could not be read: please state an explicit EUR budget")
+        work = _UNPARSED_MONEY.sub(" ", work)
+    unsupported = _UNSUPPORTED_NEGATION.findall(work)
+    if unsupported:
+        clarification = True
+        warnings += [f"Please clarify the unsupported restriction: “{clause.strip()}”" for clause in unsupported]
+        work = _UNSUPPORTED_NEGATION.sub(" ", work)
+    return work, min(budgets) if budgets else None, substitution_allowed, clarification, warnings
 
 
 # ----------------------------------------------------------------------------- requirements
@@ -229,6 +321,8 @@ def parse(text: str, today: date) -> ParsedRequest:
     warnings: list[str] = []
     work = normalise_numbers(text)
     delivery, work = extract_date(work, today)
+    work, budget, substitutions, clarification, control_warnings = extract_controls(work)
+    warnings.extend(control_warnings)
     assumed = delivery is None
     if assumed:
         delivery = next_delivery_day(today)
@@ -260,6 +354,11 @@ def parse(text: str, today: date) -> ParsedRequest:
                     unit = "SALES_UNIT"
                     assumption = "No unit given: assumed sales units (cases or pieces)"
                 segment = segment[: qty_match.start()] + " " + segment[qty_match.end():]
+                if not math.isfinite(quantity) or quantity <= 0:
+                    quantity = unit = None
+                    assumption = "Quantity must be positive and finite: please state the amount"
+                    clarification = True
+                    warnings.append(assumption)
             phrase = _product_phrase(segment)
             if not phrase or (quantity is None and not _is_product(phrase)):
                 # requirements stated on their own ("everything must be nut-free") apply to the whole sentence
@@ -286,7 +385,11 @@ def parse(text: str, today: date) -> ParsedRequest:
             warnings.append(f"No quantity for “{it.product_query}”")
     if not items:
         warnings.append("No products recognised: try e.g. “200 litres of lactose-free milk by Monday”")
-    return ParsedRequest(items=items, delivery_date=delivery, delivery_date_assumed=assumed, parser="rules", warnings=warnings)
+    return ParsedRequest(
+        items=items, delivery_date=delivery, delivery_date_assumed=assumed,
+        budget_eur=budget, substitution_allowed=substitutions, clarification_required=clarification,
+        parser="rules", warnings=warnings,
+    )
 
 
 def _merge(a: Constraints, b: Constraints) -> Constraints:

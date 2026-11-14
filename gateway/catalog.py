@@ -16,7 +16,7 @@ RAW_PRODUCTS = "valio_aimo_junction26_product_data.json"
 RAW_RELIABILITY = "valio_aimo_junction26_delivery_reliability.csv"
 RAW_CO2 = "valio_aimo_junction26_carbon_footprint.csv"
 SLIM = "catalog_slim.json"
-SLIM_VERSION = 2
+SLIM_VERSION = 3
 
 TEMPERATURE_LABELS = {"warmTemperature", "coolTemperature", "freezeTemperature"}
 _SIZE_RE = re.compile(r"(?:(\d+)\s*[x×]\s*)?(\d+(?:[.,]\d+)?)\s*(ml|cl|dl|ltr|l|kg|gr|g)\b", re.IGNORECASE)
@@ -43,6 +43,54 @@ DERIVATIVE_WORDS = {
 }
 
 
+# Category codes have no supplied names. Use explicit utensil/cleaning words as a
+# conservative boundary, rather than let a food keyword also match a milk jug.
+_NON_FOOD_WORDS = {
+    "jug", "pitcher", "tableware", "cutlery", "fork", "knife", "spoon", "ladle",
+    "spatula", "whisk", "napkin", "glove", "foil", "detergent", "cleaner",
+    "cleaning", "dishwasher", "soap", "lotion", "shampoo", "shower", "candle",
+    "toothpaste", "towel",
+}
+_NON_FOOD_FI = {
+    "kannu", "kaadin", "aterin", "haarukka", "veitsi", "lusikka", "vispilä",
+    "servietti", "lautasliina", "käsine", "folio", "pesuaine", "saippua",
+    "shampoo", "kynttilä", "pyyhe",
+}
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[\wäöåé]+", text.lower())
+
+
+def _non_food_text(text: str) -> bool:
+    words = _words(text)
+    return any(w in _NON_FOOD_WORDS or w.rstrip("s") in _NON_FOOD_WORDS for w in words) or any(
+        word.endswith(marker) for word in words for marker in _NON_FOOD_FI
+    )
+
+
+def _product_names(p: dict) -> str:
+    return " ".join(p.get(k) or "" for k in ("name", "name_fi", "name_sv"))
+
+
+def is_capacity_product(p: dict) -> bool:
+    """A jug's 1 L is its capacity, not one litre of a purchasable ingredient."""
+    words = _words(_product_names(p))
+    return any(w in {"jug", "jugs", "pitcher", "pitchers"} for w in words) or any(
+        word.endswith(marker) for word in words for marker in ("kannu", "kaadin")
+    )
+
+
+def matches_product_kind(p: dict, phrases: list[str]) -> bool:
+    """Keep explicit non-food requests and food requests in separate result pools.
+
+    This is a lexical guard for the challenge's unnamed category codes, not a full
+    product taxonomy. Apply it to supplier substitutions as well as search hits.
+    """
+    wants_non_food = any(_non_food_text(phrase) for phrase in phrases)
+    return _non_food_text(_product_names(p)) == wants_non_food
+
+
 def parse_size(name: str) -> tuple[float, str] | None:
     """'Valio milk 1 l' -> (1.0, 'L'); '100x2 cl' -> (2.0, 'L'); '200 g' -> (0.2, 'KG')."""
     if not name:
@@ -53,7 +101,42 @@ def parse_size(name: str) -> tuple[float, str] | None:
     count = int(m.group(1)) if m.group(1) else 1
     value = float(m.group(2).replace(",", "."))
     unit, factor = _SIZE_FACTOR[m.group(3).lower()]
+    if count <= 0 or value <= 0:
+        return None
     return round(count * value * factor, 4), unit
+
+
+def _sales_content(p: dict, names: dict[str, str], units: dict) -> tuple[float | None, str | None]:
+    """Infer sales-unit content once, without counting an explicit multipack twice.
+
+    A name such as 30x80g already describes 2.4 kg. If KI=30 ST, multiplying
+    that total by 30 a second time would incorrectly turn the case into 72 kg.
+    Conflicting pack counts stay unknown until the price API can cross-check.
+    """
+    record = {"name": names.get("en"), "name_fi": names.get("fi"), "name_sv": names.get("sv")}
+    if is_capacity_product(record):
+        return None, None
+    sales, base = p.get("salesUnit"), p.get("baseUnit")
+    if sales in ("KG", "L"):
+        return 1.0, sales
+    factor = 1.0 if sales == base else units.get(sales)
+    if not isinstance(factor, (int, float)) or factor <= 0:
+        return None, None
+    if base in ("KG", "L"):
+        return round(factor, 4), base
+    for language in ("en", "fi"):
+        name = names.get(language, "")
+        size = parse_size(name)
+        if not size:
+            continue
+        match = _SIZE_RE.search(name)
+        count = int(match.group(1)) if match and match.group(1) else 1
+        if count > 1:
+            if factor != 1 and factor != count:
+                return None, None
+            return size
+        return round(size[0] * factor, 4), size[1]
+    return None, None
 
 
 def _read_csv_map(path: Path, column: str) -> dict[str, float]:
@@ -96,15 +179,7 @@ def build_slim(valio_dir: Path) -> list[dict]:
         units = {u["unitId"]: u.get("sizeInBaseUnits") for u in p.get("units") or [] if u.get("unitId")}
         sales_unit, base_unit = p.get("salesUnit"), p.get("baseUnit")
 
-        content = content_unit = None
-        if sales_unit == "KG":
-            content, content_unit = 1.0, "KG"
-        else:
-            size = parse_size(names.get("en", "")) or parse_size(names.get("fi", ""))
-            if size:
-                factor = 1.0 if sales_unit == base_unit else units.get(sales_unit)
-                if factor:
-                    content, content_unit = round(size[0] * factor, 4), size[1]
+        content, content_unit = _sales_content(p, names, units)
 
         products.append(
             {
@@ -185,6 +260,8 @@ class Catalog:
 
         scored: list[tuple[dict, float]] = []
         for p, en, en_words, fi, fi_words, sv, brand in self._index:
+            if not matches_product_kind(p, phrases):
+                continue
             best = 0.0
             for words in compiled:
                 total = 0.0

@@ -42,9 +42,12 @@ SCHEMA = {
         },
         "delivery_date": {"type": "string", "description": "YYYY-MM-DD"},
         "delivery_date_stated": {"type": "boolean"},
+        "budget_eur": {"type": ["number", "null"], "description": "Maximum order total in EUR excluding VAT, or null if no budget is stated"},
+        "substitution_allowed": {"type": "boolean"},
+        "clarification_required": {"type": "boolean"},
         "notes": {"type": "string"},
     },
-    "required": ["items", "delivery_date", "delivery_date_stated", "notes"],
+    "required": ["items", "delivery_date", "delivery_date_stated", "budget_eur", "substitution_allowed", "clarification_required", "notes"],
     "additionalProperties": False,
 }
 
@@ -67,6 +70,15 @@ Rules:
   free from AN and AP. origin_country "fi" for Finnish/domestic, otherwise "".
 - delivery_date: a weekday name means the next such day after today. "Tomorrow" is today + 1.
   If no date is stated, use the next weekday (Monday-Friday) and set delivery_date_stated false.
+- Budgets and substitution instructions are order controls, never products. budget_eur is a
+  positive maximum total in EUR excluding VAT; it is independent of the agent's approval limit.
+  Use null if no budget is stated. Never convert another currency without asking.
+- substitution_allowed: false for "no substitutions", "do not substitute" or "do not replace",
+  including "do not substitute with regular milk". This conservatively disallows substitutes
+  outside the stated requirements; other catalog options that fully match remain allowed.
+- clarification_required: true for conflicting/invalid budgets, non-EUR budgets, unknown currency,
+  conflicting substitution instructions, unsupported restrictions or contradictory requirements.
+  Explain what needs clarification in notes. Do not silently drop these conditions.
 - Ignore sentences that are not about products (e.g. "find the best option")."""
 
 
@@ -88,7 +100,22 @@ async def parse(text: str, today: date, model: str) -> ParsedRequest:
     if response.stop_reason == "max_tokens":
         raise RuntimeError("the model's answer was cut off")
     raw = next(b.text for b in response.content if b.type == "text")
-    return to_parsed(json.loads(raw), today)
+    parsed = to_parsed(json.loads(raw), today)
+    # The deterministic guard independently preserves explicit controls even if the
+    # language model overlooks them. More restrictive results always take precedence.
+    from agent.rules_parser import extract_controls, extract_date, normalise_numbers
+
+    _, controls_text = extract_date(normalise_numbers(text), today)
+    _, budget, substitutions, clarification, notes = extract_controls(controls_text)
+    if budget is not None:
+        if parsed.budget_eur is not None and parsed.budget_eur != budget:
+            parsed.clarification_required = True
+            parsed.warnings.append("The parsed budget differs from the explicit EUR cap; please confirm the amount")
+        parsed.budget_eur = budget
+    parsed.substitution_allowed = parsed.substitution_allowed and substitutions
+    parsed.clarification_required = parsed.clarification_required or clarification
+    parsed.warnings.extend(notes)
+    return parsed
 
 
 def to_parsed(data: dict, today: date) -> ParsedRequest:
@@ -131,4 +158,8 @@ def to_parsed(data: dict, today: date) -> ParsedRequest:
             warnings.append("No delivery date given: assumed the next delivery day")
     if data.get("notes"):
         warnings.append(f"Claude: {data['notes']}")
-    return ParsedRequest(items=items, delivery_date=delivery, delivery_date_assumed=not stated, parser="claude", warnings=warnings)
+    return ParsedRequest(
+        items=items, delivery_date=delivery, delivery_date_assumed=not stated,
+        budget_eur=data.get("budget_eur"), substitution_allowed=data.get("substitution_allowed", True),
+        clarification_required=data.get("clarification_required", False), parser="claude", warnings=warnings,
+    )

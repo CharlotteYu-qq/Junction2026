@@ -23,7 +23,7 @@ from contracts.models import (
     RequestItem,
 )
 from contracts.vocab import ALLERGENS, CLAIMS, LABELS, SALES_UNITS
-from gateway.catalog import Catalog
+from gateway.catalog import Catalog, is_capacity_product, matches_product_kind
 from gateway.config import TZ
 from gateway.valio_client import ValioAPIError, ValioClient
 from trust.policy import constraint_check
@@ -87,25 +87,35 @@ def _price_info(row: dict | None) -> PriceInfo:
 def _content(p: dict, price: PriceInfo) -> tuple[float | None, str | None]:
     """Content of one sales unit in L or KG: from the product name, cross-checked with the
     ratio of unit price to comparison price returned by Valio's price API."""
+    if is_capacity_product(p):
+        return None, None
     content, unit = p.get("content"), p.get("content_unit")
-    if price.unit_price and price.comparison_price and price.comparison_unit in ("L", "KG"):
+    if (price.unit_price is not None and price.unit_price > 0
+            and price.comparison_price is not None and price.comparison_price > 0
+            and price.comparison_unit in ("L", "KG")):
         ratio = price.unit_price / price.comparison_price
-        if not content or unit != price.comparison_unit or abs(content - ratio) / ratio > 0.1:
-            content, unit = round(ratio, 2), price.comparison_unit
+        if math.isfinite(ratio) and (not content or unit != price.comparison_unit or abs(content - ratio) / ratio > 0.1):
+            content, unit = round(ratio, 6), price.comparison_unit
     return content, unit
 
 
 def order_quantity(req: RequestItem, p: dict, content: float | None, unit: str | None) -> tuple[float | None, str]:
     if req.quantity is None or req.unit is None:
         return None, "quantity missing"
+    if not math.isfinite(req.quantity) or req.quantity <= 0:
+        return None, "quantity must be positive"
     sales_unit, base_unit = p["sales_unit"], p["base_unit"]
     if req.unit in ("L", "KG"):
-        if content and unit == req.unit:
+        if is_capacity_product(p):
+            return None, "container capacity is not ingredient content; order utensils in pieces"
+        if content and math.isfinite(content) and content > 0 and unit == req.unit:
             raw = req.quantity / content
         else:
             return None, f"can't convert {req.unit} into {SALES_UNITS.get(sales_unit, sales_unit)}"
     elif req.unit == "PCS":
-        size = 1.0 if sales_unit == base_unit else (p["units"].get(sales_unit) or 1.0)
+        size = 1.0 if sales_unit == base_unit else p["units"].get(sales_unit)
+        if base_unit in ("KG", "L") or not size or size <= 0:
+            return None, "piece count per sales unit is unknown"
         raw = req.quantity / size
     else:
         raw = req.quantity
@@ -224,10 +234,15 @@ def _rank(cands: list[Candidate]) -> None:
 
 
 def _recommend(cands: list[Candidate]) -> str | None:
-    usable = [c for c in cands if c.availability.status != "unavailable"]
-    priced = [c for c in usable if c.line_total is not None]
-    pool = priced or usable
-    return pool[0].product_id if pool else None
+    # Keep exceptions visible, but do not preselect an infeasible commitment.
+    feasible = [
+        c for c in cands
+        if c.meets_constraints and c.availability.status == "ok" and not c.availability.sales_block
+        and c.quantity is not None and math.isfinite(c.quantity) and c.quantity > 0
+        and c.line_total is not None and math.isfinite(c.line_total) and c.line_total >= 0
+        and c.price.unit_price is not None and not c.price.error
+    ]
+    return feasible[0].product_id if feasible else None
 
 
 # ----------------------------------------------------------------------------- main entry
@@ -282,7 +297,7 @@ async def build_offer(
         for p, score, *_ in list(shortlist):
             for sid in p.get("substitutes") or []:
                 sp = catalog.by_id.get(sid)
-                if sp and sid not in ids:
+                if sp and sid not in ids and matches_product_kind(sp, phrases):
                     ok, notes, hard = constraint_check(sp, item.constraints, customer)
                     if not hard:
                         shortlist.append((sp, max(score - 1, 0.5), ok, notes, f"Valio Aimo substitute for {p['id']}"))
@@ -353,6 +368,8 @@ async def build_offer(
             note = "No matching products found. Try other words, or remove a requirement."
         else:
             note = f"{n_meet} of {len(cands)} shortlisted options meet the request; {n_on_time} can be delivered on {parsed.delivery_date:%a %d %b}."
+            if rec is None:
+                note += " No feasible option is selected. Adjust the request or evaluate an alternative."
         items.append(OfferItem(request=item, candidates=cands, recommended_product_id=rec, note=note))
         best = next((c for c in cands if c.product_id == rec), None)
         if best and best.quantity is not None and best.line_total is not None:

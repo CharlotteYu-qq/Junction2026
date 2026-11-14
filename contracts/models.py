@@ -29,7 +29,7 @@ class RequestItem(BaseModel):
     product_query: str  # short noun phrase, e.g. "milk"
     search_phrases: list[str] = Field(default_factory=list)  # alternatives; words inside one phrase are ANDed
     exclude_words: list[str] = Field(default_factory=list)  # words that point to a different product
-    quantity: Optional[float] = None
+    quantity: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     unit: Optional[RequestUnit] = None
     constraints: Constraints = Field(default_factory=Constraints)
     assumption: str = ""  # anything the parser had to assume
@@ -39,6 +39,12 @@ class ParsedRequest(BaseModel):
     items: list[RequestItem]
     delivery_date: date
     delivery_date_assumed: bool = False
+    budget_eur: Optional[float] = Field(
+        default=None, gt=0, allow_inf_nan=False,
+        description="Buyer's maximum order total in EUR, excluding VAT; separate from the agent's approval limit.",
+    )
+    substitution_allowed: bool = True  # false: no substitutes outside the stated requirements
+    clarification_required: bool = False  # unsupported/conflicting controls must be resolved before ordering
     parser: Literal["rules", "claude"] = "rules"
     warnings: list[str] = Field(default_factory=list)
 

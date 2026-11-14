@@ -48,7 +48,7 @@ We build a **gateway** between external purchasing agents and Valio Aimo's backe
 | # | Idea | What it gives |
 |---|------|---------------|
 | 1 | **One agent interface, two transports.** The same set of tools is offered as an **MCP server** (for LLM agents) and as **REST/OpenAPI** (for any other client). | Open standards, no lock-in to one platform |
-| 2 | **Signed offers that expire** *(trust protocol)*. Every price and availability answer is an offer with an `offer_id`, a validity window, its data source and timestamp, and a Valio Aimo signature (Ed25519). An order points to an offer. | An agent can check claims without a manual step, and prices are fixed |
+| 2 | **Signed offers that expire** *(trust protocol)*. Every price and availability answer is an offer with an `offer_id`, a validity window, its data source and timestamp, and a gateway signature (Ed25519). An order points to an offer. | An agent can check claims without a manual step, and prices are fixed |
 | 3 | **Mandates and a policy engine** *(guardrails)*. The buyer organisation gives each agent a mandate a machine can read: spend limits, allowed categories, required labels, allergen rules and how far substitutes may differ. Each order is checked against it and gets one of three results: `auto_approve`, `needs_approval` (with reasons) or `reject`. | Clear lines between what the agent decides alone and what a human signs off |
 | 4 | **An audit trail people can read**. Every step (search, offer, decision, approval, order) is added to a log where each entry is chained to the previous one by its hash. Each entry includes the agent's stated reason. The log is shown as a timeline to the buyer and to Valio Aimo. | Traceability and explanations, and trust on both sides |
 
@@ -133,15 +133,15 @@ Next step: expose the same operations as **MCP tools**, so LLM agents can call t
 | Customer on the whitelist, total within its auto-approval limit, everything available on time and matching the request | ✅ Placed automatically |
 | New customer (not on the whitelist) | 🧑 Person approves, and can verify the customer at the same time |
 | Total above the auto-approval limit, or more than 3× the customer's average order | 🧑 Person approves |
-| Not enough stock, a later delivery date, or the order cut-off has passed | 🧑 Person approves |
-| Substitute that doesn't match the request (e.g. not lactose-free) | 🧑 Person approves |
-| No allergen data for a customer with a strict allergen rule | 🧑 Person approves |
+| Not enough stock, a later delivery date, or the order cut-off has passed | ⛔ Revise the quantity/date and request a new offer |
+| Substitute outside preferences | 🧑 Person approves only when substitution is permitted; requested allergen exclusions remain hard rules |
+| Missing explicit evidence for a requested or strict allergen exclusion | ⛔ Blocked until evidence is obtained and a new offer is evaluated |
 | Product contains or may contain an allergen the customer never accepts | ⛔ Excluded / rejected (hard rule) |
-| Offer expired or signature mismatch | ⛔ Rejected |
+| Offer expired or signature mismatch | ⛔ Rejected, including when approval is attempted |
 
 ## What stays private
 
-The gateway exposes only selected data. It never exposes purchase prices, margins, supplier terms, other customers' data or the internal roadmap. The backend API key stays on the server. Each agent signs in with its own credential, which can be limited in scope and revoked.
+The gateway exposes only selected data. It never exposes purchase prices, margins, supplier terms, other customers' data or the internal roadmap. The backend API key stays on the server. The deployed MVP uses a shared demo login; scoped agent credentials and buyer/reviewer role separation are production next steps.
 
 ## Repository layout
 
@@ -187,3 +187,13 @@ Then follow [Run the MVP locally](#run-the-mvp-locally) above. Each module's fol
 
 - Resource portal: <https://junction26.valioaimo.fi/>. It has the datasets, API docs and mock backend access. The password and API key are in the team chat and in your local `.env`, **never in this repo**.
 - All provided data is synthetic. No production systems or confidential data are involved.
+
+## Regression checks
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Tests use synthetic fixtures and temporary storage, without API keys or live ordering. They cover budget and substitution parsing, allergen exclusions, approval revalidation, candidate relevance, packaging conversion and customer-separated API caches.
+
+Editing a request invalidates its current quote; re-run before submitting. A stated budget is a hard EUR limit excluding VAT, separate from the customer auto-approval limit. Missing dates or units require confirmation. Insufficient stock or a late delivery cannot be approved as if the original request were fulfilled: revise the request and get a new quote. Approvals recheck the signed offer and hard rules; stock remains a snapshot from the mock API, without a reservation guarantee.

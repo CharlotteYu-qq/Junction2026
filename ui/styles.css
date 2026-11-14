@@ -325,3 +325,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .footer-nav { display: flex; gap: 20px; flex-wrap: wrap; }
 .footer-nav a, .footer-nav .link-button { color: #fff; }
 .footer-nav a:hover, .footer-nav .link-button:hover { color: var(--Aimo-summer); }
+
+/* State changes must be visible beside the offer and its submit action. */
+.offer-state { background: #fff5dc; border-left: 3px solid #b77800; color: #6d4900; padding: 10px 12px; margin: 12px 0; font-size: 14px; }
+.u-controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-top: 12px; }
+.u-controls input[type=number] { width: 140px; }
+.review-card[aria-busy=true] { opacity: .7; }
