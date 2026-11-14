@@ -112,23 +112,6 @@ function route() {
   loaders[page]?.();
 }
 
-async function loadHealth() {
-  const el = $('#api-status');
-  try {
-    const hl = await api('/api/health');
-    const parts = [];
-    parts.push(hl.valio_api.ok ? 'Valio Aimo API connected' : 'Valio Aimo API not reachable');
-    parts.push(hl.catalog.loaded ? `${fmt.num(hl.catalog.products)} products` : 'catalog missing');
-    parts.push(`parser: ${hl.parser === 'claude' ? `Claude (${hl.model})` : 'rules'}`);
-    el.textContent = parts.join(' · ');
-    el.className = `ribbon-status ${hl.valio_api.ok && hl.catalog.loaded ? 'ok' : 'bad'}`;
-    if (!hl.catalog.loaded) setStatus(hl.catalog.error || 'The product catalog is not loaded', true);
-  } catch {
-    el.textContent = 'Gateway not reachable';
-    el.className = 'ribbon-status bad';
-  }
-}
-
 async function refreshReviewCount() {
   if (S.session?.role !== 'valio') return;
   try {
@@ -176,7 +159,6 @@ function updateOrderControls() {
   run.disabled = S.requestPending || S.submissionPending;
   run.classList.toggle('is-busy', S.requestPending);
   $('#request-text').disabled = S.submissionPending;
-  $('#reset-demo').disabled = S.requestPending || S.submissionPending;
   const rationale = $('#rationale');
   if (rationale) rationale.disabled = S.submissionPending;
   document.querySelectorAll('#examples button').forEach((b) => { b.disabled = S.requestPending || S.submissionPending; });
@@ -1053,7 +1035,6 @@ function showSignIn(message = '') {
   $('.main-nav').hidden = true;
   $('#session-box').hidden = true;
   $('#admin-open').hidden = false;
-  $('#reset-demo').hidden = true;
   $('#page-signin').hidden = false;
   hideTip();
   renderSignIn(message);
@@ -1118,13 +1099,11 @@ function showPortal() {
   $('#admin-open').hidden = true;
   document.querySelectorAll('.main-nav a').forEach((a) => { a.hidden = !a.dataset.roles.split(' ').includes(s.role); });
   $('.main-nav').hidden = false;
-  $('#reset-demo').hidden = s.role !== 'valio';
   $('#reviewer-note').textContent = s.role === 'valio' ? `Your decisions are recorded as ${s.name} (Valio Aimo).` : '';
 }
 
 async function init() {
   initSignIn();
-  loadHealth();
   try { S.session = await api('/api/session'); } catch { S.session = { signed_in: false }; }
   if (!S.session.signed_in) { showSignIn(); return; }
   showPortal();
@@ -1142,15 +1121,6 @@ async function init() {
     updateOrderControls();
   } else {
     initRegisterForm();
-    $('#reset-demo').addEventListener('click', async () => {
-      if (!confirm('Reset the demo? Customers return to the seed data; orders and the audit trail are cleared.')) return;
-      try {
-        await api('/api/admin/reset', { method: 'POST' });
-        S.customers = await api('/api/customers');
-      } catch (e) { alert(e.message); return; }
-      refreshReviewCount();
-      route();
-    });
     refreshReviewCount();
   }
   window.addEventListener('hashchange', route);

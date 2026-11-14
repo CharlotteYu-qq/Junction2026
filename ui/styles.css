@@ -68,11 +68,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .container { max-width: var(--maxw); margin: 0 auto; padding: 0 var(--side); }
 
 /* ---------------------------------------------------------------- header */
-.top-ribbon { background: var(--Aimo-petrol); color: var(--Aimo-white); font-size: 13px; }
-.ribbon-inner { display: flex; justify-content: space-between; gap: 12px; align-items: center; min-height: 38px; flex-wrap: wrap; }
-.ribbon-status { opacity: .95; }
-.ribbon-status.ok::before { content: "● "; color: var(--Aimo-summer); }
-.ribbon-status.bad::before { content: "● "; color: #ff8a85; }
 .site-header { background: var(--Aimo-white-cold); position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--border); }
 .header-inner { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 72px; flex-wrap: wrap; }
 .brand { display: inline-flex; align-items: baseline; gap: 10px; text-decoration: none; color: var(--Aimo-petrol); }
@@ -337,10 +332,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 /* ---------------------------------------------------------------- footer */
 .site-footer { background: var(--Aimo-petrol); color: #fff; padding: 20px 0; margin-top: 56px; font-size: 14px; }
 .footer-inner { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: center; }
-.footer-nav { display: flex; gap: 20px; flex-wrap: wrap; }
-.footer-nav a, .footer-nav .link-button { color: #fff; }
-.footer-nav a:hover, .footer-nav .link-button:hover { color: var(--Aimo-summer); }
-
 /* State changes must be visible beside the offer and its submit action. */
 .offer-state { background: #fff5dc; border-left: 3px solid #b77800; color: #6d4900; padding: 10px 12px; margin: 12px 0; font-size: 14px; }
 .u-controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-top: 12px; }
@@ -380,12 +371,6 @@ h1, h2, h3, h4 { color: var(--Aimo-petrol-dark); }
 h1 { font-size: clamp(38px, 5vw, 62px); letter-spacing: -.055em; font-weight: 760; }
 h2 { letter-spacing: -.035em; }
 
-.top-ribbon {
-  background: var(--Aimo-petrol-dark);
-  font-size: 12px;
-  letter-spacing: .01em;
-}
-.ribbon-inner { min-height: 34px; }
 .site-header {
   background: rgba(255, 255, 255, .94);
   border-bottom: 1px solid rgba(17, 59, 116, .10);
@@ -493,7 +478,6 @@ th { background: #edf3fa; color: #40526e; }
 .quote { border-left-color: var(--Aimo-summer); background: #fffaf0; }
 
 .site-footer { background: var(--Aimo-petrol-dark); margin-top: 76px; padding: 30px 0; }
-.footer-nav a:hover, .footer-nav .link-button:hover { color: var(--Aimo-summer); }
 @media (max-width: 768px) {
   :root { --side: 20px; }
   .header-inner { min-height: 72px; gap: 12px; }

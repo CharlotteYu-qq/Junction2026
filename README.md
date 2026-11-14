@@ -15,7 +15,7 @@ python -m uvicorn gateway.app:app --reload --port 8000
 
 Open <http://127.0.0.1:8000>. The API docs are at <http://127.0.0.1:8000/docs>. The first start builds a slim catalog index, which takes a few seconds.
 
-The site opens on a sign-in page with two portals. Locally, with no `BUYER_PASSWORD` / `VALIO_PASSWORD` in `.env`, signing in needs no password.
+The site opens on a buyer-focused landing page. Buyers sign in there; Valio Aimo staff can open the separate admin sign-in from the header. Locally, with no `BUYER_PASSWORD` / `VALIO_PASSWORD` in `.env`, signing in needs no password.
 
 | Portal | Page | What it shows |
 |---|---|---|
@@ -26,7 +26,7 @@ The site opens on a sign-in page with two portals. Locally, with no `BUYER_PASSW
 | Valio Aimo | **Audit trail** | Every step by the customer, agent, policy and people, in plain language and hash-chained |
 | Both | **Explore** | Catalog explorer with label/diet filters and a carbon-footprint-by-product-group chart that you can click to filter |
 
-Sign in as a buyer and use the example buttons on the Order page for the demo scenarios. **Reset demo data** is in the footer of the Valio Aimo admin.
+Sign in as a buyer and use the example buttons on the Order page for the demo scenarios.
 
 **Deploying** to a Verda CPU instance takes one script: see [deploy/README.md](deploy/README.md).
 
