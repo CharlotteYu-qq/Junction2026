@@ -35,7 +35,7 @@ Both endpoints take `POST {"customer": "...", "requestedDate": "YYYY-MM-DD", "pr
 | `logisticModel` | `Stock`: Valio Aimo knows the quantity. `Terminal`: delivered from a supplier warehouse, quantity unknown |
 | `scheduleLines[0].availableAmount` | in sales units. Stock items often return `9999999999` (plenty); Terminal items always return `999999` (unknown) |
 | `scheduleLines[0].availableDate` | earliest date; can be **later** than the requested date |
-| `closingTime` | order cut-off for that delivery. **It can already be in the past** (e.g. Thursday 15:00 for a Monday delivery of Terminal items): we treat that as "cut-off passed" |
+| `closingTime` | order cut-off for **`availableDate`** (the earliest delivery), not for the requested day: the mock returns the same date and cut-off whichever day is asked for. It can already be in the past (e.g. Thursday 15:00 for a Monday delivery of Terminal items). For a later requested day we assume the same lead time (Thu 15:00 for Monday → Sun 15:00 for Thursday, `cutoff_for` in `gateway/planner.py`); "cut-off passed" means that estimate has passed |
 | `salesBlock`, empty `scheduleLines` | can't be ordered |
 
 Saturday deliveries usually come back with a later `availableDate`.
