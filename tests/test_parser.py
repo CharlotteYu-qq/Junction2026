@@ -128,6 +128,17 @@ class SharedAndClaudeControlsTest(unittest.TestCase):
         self.assertFalse(request.substitution_allowed)
         self.assertTrue(request.clarification_required)
 
+    def test_claude_explanation_of_a_stated_quantity_is_not_an_assumption(self):
+        def item(estimated):
+            return {"text": "1,000 L milk", "product_query": "milk", "quantity": 1000, "quantity_known": True,
+                    "quantity_estimated": estimated, "unit": "L", "assumption": "Quantity stated directly as 1,000 litres"}
+        payload = {"delivery_date": "2026-11-16", "delivery_date_stated": True, "budget_eur": None,
+                   "substitution_allowed": True, "clarification_required": False, "notes": ""}
+        stated = to_parsed({**payload, "items": [item(False)]}, TODAY).items[0]
+        self.assertEqual((stated.quantity, stated.unit, stated.assumption), (1000, "L", ""))
+        estimate = to_parsed({**payload, "items": [item(True)]}, TODAY).items[0]
+        self.assertTrue(estimate.assumption)  # a real estimate still needs a person to confirm it
+
     def test_old_payload_defaults_remain_compatible(self):
         request = ParsedRequest(items=[], delivery_date=date(2026, 11, 16))
         self.assertIsNone(request.budget_eur)

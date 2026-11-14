@@ -30,6 +30,10 @@ SCHEMA = {
                     "exclude_words": {"type": "array", "items": {"type": "string"}},
                     "quantity": {"type": "number"},
                     "quantity_known": {"type": "boolean"},
+                    "quantity_estimated": {
+                        "type": "boolean",
+                        "description": "True only if you estimated the amount (e.g. from people or portions) or assumed the unit",
+                    },
                     "unit": {"type": "string", "enum": ["L", "KG", "PCS", "SALES_UNIT", "UNKNOWN"]},
                     "required_claims": {"type": "array", "items": {"type": "string", "enum": sorted(CLAIMS)}},
                     "free_from_allergens": {"type": "array", "items": {"type": "string", "enum": sorted(ALLERGENS)}},
@@ -38,7 +42,7 @@ SCHEMA = {
                     "assumption": {"type": "string"},
                 },
                 "required": [
-                    "text", "product_query", "search_phrases", "exclude_words", "quantity", "quantity_known", "unit",
+                    "text", "product_query", "search_phrases", "exclude_words", "quantity", "quantity_known", "quantity_estimated", "unit",
                     "required_claims", "free_from_allergens", "required_labels", "origin_country", "assumption",
                 ],
                 "additionalProperties": False,
@@ -68,8 +72,9 @@ Rules:
   coffee, powder, portion).
 - quantity/unit: L for volume, KG for weight, PCS for pieces, SALES_UNIT for cases/packs/bottles.
   Convert dl, cl, ml, g and tonnes. If the amount is given as people or portions, estimate a sensible
-  professional amount, set quantity_known true and explain it in assumption. If there is no amount
-  at all, set quantity_known false, quantity 0 and unit UNKNOWN.
+  professional amount, set quantity_known and quantity_estimated true and explain the estimate in
+  assumption. If there is no amount at all, set quantity_known false, quantity 0 and unit UNKNOWN.
+- assumption: empty unless quantity_estimated is true. A stated amount needs no explanation.
 - required_claims, free_from_allergens, required_labels: only what the request states. Nut-free means
   free from AN and AP. origin_country "fi" for Finnish/domestic, otherwise "".
 - delivery_date: a weekday name means the next such day after today. "Tomorrow" is today + 1.
@@ -130,6 +135,9 @@ def to_parsed(data: dict, today: date) -> ParsedRequest:
     items = []
     for it in data.get("items", []):
         known = it.get("quantity_known") and it.get("unit") != "UNKNOWN" and (it.get("quantity") or 0) > 0
+        # The policy asks a person to confirm any item with an assumption, so keep it only for real
+        # estimates: models also write explanations ("stated directly as 1,000 L") into that field.
+        estimated = bool(it.get("quantity_estimated")) or not known
         items.append(
             RequestItem(
                 text=it.get("text", ""),
@@ -144,7 +152,7 @@ def to_parsed(data: dict, today: date) -> ParsedRequest:
                     required_labels=[lbl for lbl in it.get("required_labels", []) if lbl in LABELS],
                     origin_country=(it.get("origin_country") or "").lower() or None,
                 ),
-                assumption=it.get("assumption", ""),
+                assumption=it.get("assumption", "") if estimated else "",
             )
         )
         if not known:
