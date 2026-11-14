@@ -267,9 +267,16 @@ function offerSummary(offer, decision, { habits = [], updated = false } = {}) {
   const picks = offer.items.map((item) => item.candidates.find((c) => c.product_id === item.recommended_product_id))
     .filter(Boolean).map((c) => `${c.name} × ${fmt.num(c.quantity, 2)} ${unitLabel(c.sales_unit, c.quantity)} = ${fmt.eur(c.line_total)}`);
   const blocked = decision?.outcome === 'reject';
+  // Say which matching products are short of stock (at least as close to the request as the recommended one).
+  const short = offer.items.flatMap((item) => {
+    const rec = item.candidates.find((c) => c.product_id === item.recommended_product_id);
+    return item.candidates.filter((c) => c.availability.status === 'partial' && (!rec || c.match_score >= rec.match_score))
+      .slice(0, 2).map((c) => c.name);
+  });
+  const stock = short.length ? ` Not enough stock: ${short.join('; ')}.` : '';
   return history + `${updated ? 'Updated the order' : 'Got it'}: ${wants}, delivery ${fmt.day(p.delivery_date)}. `
     + (picks.length
-      ? `I checked prices and stock with Valio Aimo. ${blocked ? 'My best match is' : 'I recommend'} ${picks.join('; ')}.${blocked ? '' : ' Choose an option below and place the order.'}`
+      ? `I checked prices and stock with Valio Aimo.${stock} ${blocked ? 'My best match is' : 'I recommend'} ${picks.join('; ')}.${blocked ? '' : ' Choose an option below and place the order.'}`
       : (blocked ? '' : 'I found no option that can be ordered as asked.'))
     + fixesSummary(decision);
 }
