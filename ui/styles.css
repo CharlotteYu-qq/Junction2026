@@ -139,12 +139,37 @@ select { padding-right: 28px; }
 .order-card .outcome { margin-top: 0; }
 .order-total { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 12px; }
 .order-total .hero-figure { font-size: 36px; }
+/* the approval dialog: compact, so it fits without scrolling */
+.admin-dialog.approve-dialog { width: min(560px, calc(100% - 32px)); max-height: calc(100vh - 32px); border-radius: 20px; }
+.approve-head {
+  display: flex; align-items: center; gap: 14px; padding: 16px 18px 16px 22px;
+  background: linear-gradient(135deg, #173e75 0%, #0c2b56 100%); border-bottom: 3px solid var(--Aimo-summer); color: #fff;
+}
+.approve-mark {
+  flex: 0 0 auto; width: 38px; height: 38px; display: grid; place-items: center; border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, .36); background: rgba(255, 255, 255, .12); font-size: 18px; font-weight: 800;
+}
+.approve-heading { flex: 1 1 auto; min-width: 0; }
+.approve-kicker { margin: 0 0 2px; color: #f9db70; font-size: 11px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+.approve-heading h2 { color: #fff; font-size: 20px; line-height: 1.25; letter-spacing: -.02em; }
+.approve-head .dialog-close { width: 34px; height: 34px; font-size: 22px; }
+.approve-body { padding: 18px 22px 20px; }
 .approve-summary { margin-bottom: 16px; }
 .approve-total { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.approve-total strong { font-size: 26px; }
-.approve-lines { list-style: none; padding: 0; margin: 8px 0 12px; }
-.approve-lines li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
-.approve-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.approve-total strong { font-size: 24px; }
+.approve-lines { list-style: none; padding: 0; margin: 6px 0 10px; }
+.approve-lines li { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+.approve-lines li strong { white-space: nowrap; }
+.approve-summary .label { font-size: 13px; margin: 4px 0 2px; color: var(--text-secondary); }
+.approve-summary .checks { margin: 0; }
+.approve-form { display: flex; flex-direction: column; }
+.approve-form label { font-size: 14px; color: var(--Aimo-petrol-dark); }
+.approve-form input { width: 100%; }
+.approve-form .hint { margin-top: 6px; font-size: 12px; }
+.approve-form .signin-error { margin: 8px 0 0; }
+.approve-actions { display: flex; gap: 10px; margin-top: 16px; }
+.approve-actions .btn { flex: 1 1 0; justify-content: center; white-space: nowrap; }
+@media (max-width: 480px) { .approve-actions { flex-direction: column-reverse; } .approve-heading h2 { font-size: 18px; } }
 .order-strip { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 28px; background: #fff; box-shadow: var(--shadow); }
 .strip-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .strip-lines { flex: 1 1 260px; }

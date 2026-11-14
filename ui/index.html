@@ -200,25 +200,25 @@
   </main>
 
   <dialog id="approve-dialog" class="admin-dialog approve-dialog" aria-labelledby="approve-title">
-    <div class="admin-dialog-banner">
-      <div class="admin-dialog-head">
-        <span class="admin-dialog-mark" aria-hidden="true">✓</span>
-        <button type="button" class="dialog-close" id="approve-close" aria-label="Don't order">×</button>
+    <div class="approve-head">
+      <span class="approve-mark" aria-hidden="true">✓</span>
+      <div class="approve-heading">
+        <p class="approve-kicker">Needs your approval</p>
+        <h2 id="approve-title">This order is outside the agent's limit</h2>
       </div>
-      <p class="admin-dialog-kicker">Needs your approval</p>
-      <h2 id="approve-title">This order is outside the agent's limit</h2>
+      <button type="button" class="dialog-close" id="approve-close" aria-label="Don't order">×</button>
     </div>
-    <div class="admin-dialog-body">
+    <div class="approve-body">
       <div id="approve-summary" class="approve-summary"></div>
-      <form id="approve-form" class="admin-signin-form" novalidate>
-        <div class="field"><label for="approve-name">Type your full name to approve</label>
-          <input id="approve-name" type="text" maxlength="80" autocomplete="name" placeholder="First and last name">
-          <span class="hint muted">The order is placed in your name and recorded in the audit trail.</span></div>
-        <div class="approve-actions">
-          <button class="btn btn-primary" type="submit" id="approve-submit">Approve and place the order</button>
-          <button class="btn" type="button" id="approve-cancel">Don't order</button>
-        </div>
+      <form id="approve-form" class="approve-form" novalidate>
+        <label for="approve-name">Type your full name to approve</label>
+        <input id="approve-name" type="text" maxlength="80" autocomplete="name" placeholder="First and last name">
+        <span class="hint muted">The order is placed in your name and recorded in the audit trail.</span>
         <p class="signin-error bad small" role="alert" hidden></p>
+        <div class="approve-actions">
+          <button class="btn" type="button" id="approve-cancel">Don't order</button>
+          <button class="btn btn-primary" type="submit" id="approve-submit">Approve and place order</button>
+        </div>
       </form>
     </div>
   </dialog>
