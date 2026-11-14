@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from contracts.models import Decision, Offer, Order, ParsedRequest
 from gateway import app as gateway_app
+from gateway.catalog import Catalog
 from gateway.config import TZ, settings
 from gateway.store import Store
 from trust.audit import AuditLog
@@ -92,6 +93,37 @@ class PortalTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/audit').status_code, 403)
         self.assertEqual(self.client.post('/api/admin/reset').status_code, 403)
         self.assertEqual(self.client.post('/api/customers/C-2001/verify').status_code, 403)
+
+    def test_analytics_are_admin_only_and_explore_returns_aggregates(self):
+        products = [
+            {"id": "secret-1", "name": "Milk Alpha", "name_fi": "", "category": "dairy", "country": "fi",
+             "co2": 1.5, "reliability": 0.9, "claims": [], "labels": []},
+            {"id": "secret-2", "name": "Milk Beta", "name_fi": "", "category": "dairy", "country": "se",
+             "co2": 2.5, "reliability": None, "claims": [], "labels": []},
+        ]
+        with patch.object(gateway_app.S, 'catalog', Catalog(products)):
+            self.assertEqual(self.client.get('/api/admin/analytics').status_code, 401)
+            self.assertEqual(self.client.get('/api/catalog/search?q=milk').status_code, 401)
+            self.login(role='buyer', customer_id='C-1001', password='buyer-pw')
+            self.assertEqual(self.client.get('/api/admin/analytics').status_code, 403)
+            explore = self.client.get('/api/catalog/search?q=milk').json()
+            self.assertEqual(explore['kpis']['total'], 2)
+            self.assertEqual(explore['groups'][0]['co2'], 2.0)
+            self.assertNotIn('results', explore)
+            self.assertNotIn('Milk Alpha', str(explore))
+            self.assertNotIn('secret-1', str(explore))
+
+            self.client.post('/api/session/logout')
+            self.login(role='valio', name='Anna', password='valio-pw')
+            analytics = self.client.get('/api/admin/analytics')
+            self.assertEqual(analytics.status_code, 200)
+            data = analytics.json()
+            self.assertEqual(data['summary']['products'], 2)
+            self.assertEqual(data['summary']['avg_co2'], 2.0)
+            self.assertEqual(data['summary']['reliability_products'], 1)
+            self.assertEqual({row['code'] for row in data['countries']}, {'fi', 'se'})
+            self.assertNotIn('Milk Alpha', str(data))
+            self.assertNotIn('secret-1', str(data))
 
     def test_valio_staff_review_but_do_not_order(self):
         self.assertEqual(self.login(role='valio', name='Anna', password='valio-pw').status_code, 200)

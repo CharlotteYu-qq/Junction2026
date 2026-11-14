@@ -573,12 +573,12 @@ def _mean(values: list[float]) -> float | None:
 
 @app.get("/api/catalog/search", tags=["catalog"])
 def catalog_search(
+    who: Principal = Depends(signed_in),
     q: str = Query(min_length=2, max_length=80),
     filters: str = Query(default="", description="comma-separated, e.g. claim:VEGAN,origin:fi"),
     category: str = "",
-    limit: int = Query(default=40, ge=1, le=100),
 ):
-    """Explore the static assortment (no live API calls): facets, product groups with CO2e, results."""
+    """Explore the assortment using aggregate metrics only; product-level data is not exposed here."""
     _need_catalog()
     phrases = rules_parser.query_phrases(q)
     matches = [p for p, _ in S.catalog.search(phrases, limit=800)]
@@ -595,27 +595,138 @@ def catalog_search(
     for cat, ps in groups_map.items():
         co2 = [p["co2"] for p in ps if p.get("co2") is not None]
         rel = [p["reliability"] for p in ps if p.get("reliability") is not None]
-        groups.append({"category": cat, "count": len(ps), "co2": _mean(co2), "reliability": _mean(rel), "example": ps[0]["name"]})
+        groups.append({"category": cat, "count": len(ps), "co2": _mean(co2), "reliability": _mean(rel)})
     groups.sort(key=lambda g: (g["co2"] is None, -(g["co2"] or 0)))
     if category:
         filtered = [p for p in filtered if p.get("category") == category]
     rel = [p["reliability"] for p in filtered if p.get("reliability") is not None]
-    keep = ("id", "name", "brand", "vendor", "category", "sales_unit", "content", "content_unit", "claims", "labels",
-            "contains", "may_contain", "country", "reliability", "co2")
+    co2 = [p["co2"] for p in filtered if p.get("co2") is not None]
     return {
-        "query": q,
-        "phrases": phrases,
         "total": len(filtered),
         "facets": facets,
-        "groups": groups[:12],
+        "groups": groups,
         "groups_total": len(groups),
         "kpis": {
             "total": len(filtered),
             "with_reliability": len(rel),
             "avg_reliability": _mean(rel),
-            "with_co2": sum(1 for p in filtered if p.get("co2") is not None),
+            "with_co2": len(co2),
+            "avg_co2": _mean(co2),
         },
-        "results": [{k: p.get(k) for k in keep} for p in filtered[:limit]],
+    }
+
+
+def _catalog_analytics(products: list[dict]) -> dict:
+    categories: dict[str, list[dict]] = defaultdict(list)
+    countries: dict[str, list[dict]] = defaultdict(list)
+    for product in products:
+        categories[product.get("category") or "unknown"].append(product)
+        countries[(product.get("country") or "unknown").lower()].append(product)
+
+    def measures(key: str, items: list[dict]) -> dict:
+        values = [p[key] for p in items if p.get(key) is not None]
+        return {"count": len(values), "average": _mean(values)}
+
+    category_stats = []
+    for code, items in categories.items():
+        carbon = measures("co2", items)
+        reliability = measures("reliability", items)
+        category_stats.append({
+            "category": code,
+            "products": len(items),
+            "carbon_products": carbon["count"],
+            "avg_co2": carbon["average"],
+            "reliability_products": reliability["count"],
+            "avg_reliability": reliability["average"],
+        })
+    category_stats.sort(key=lambda x: (-x["products"], x["category"]))
+
+    country_stats = []
+    for code, items in countries.items():
+        carbon = measures("co2", items)
+        reliability = measures("reliability", items)
+        country_stats.append({
+            "code": code,
+            "products": len(items),
+            "carbon_products": carbon["count"],
+            "avg_co2": carbon["average"],
+            "reliability_products": reliability["count"],
+            "avg_reliability": reliability["average"],
+        })
+    country_stats.sort(key=lambda x: (-x["products"], x["code"]))
+
+    carbon = measures("co2", products)
+    reliability = measures("reliability", products)
+    return {
+        "summary": {
+            "products": len(products),
+            "categories": len(category_stats),
+            "countries": len(country_stats),
+            "carbon_products": carbon["count"],
+            "avg_co2": carbon["average"],
+            "reliability_products": reliability["count"],
+            "avg_reliability": reliability["average"],
+        },
+        "categories": category_stats,
+        "countries": country_stats,
+    }
+
+
+@app.get("/api/admin/analytics", tags=["analytics"])
+def admin_analytics(who: Principal = Depends(valio_staff)):
+    """Full assortment aggregates for Valio Aimo staff; contains no customer or order records."""
+    _need_catalog()
+    return _catalog_analytics(S.catalog.products)
+
+
+def _market_watchlist(products: list[dict], limit: int = 12) -> list[dict]:
+    """Select a small, varied set for a live operational check."""
+    selected: list[dict] = []
+    seen_categories: set[str] = set()
+    for product in products:
+        category = product.get("category") or "unknown"
+        if category not in seen_categories:
+            selected.append(product)
+            seen_categories.add(category)
+        if len(selected) == limit:
+            break
+    return selected
+
+
+@app.get("/api/admin/market-snapshot", tags=["analytics"])
+async def admin_market_snapshot(who: Principal = Depends(valio_staff)):
+    """Bounded live price and availability watchlist for Valio Aimo operators."""
+    _need_catalog()
+    products = _market_watchlist(S.catalog.products)
+    requested = datetime.now(TZ).date()
+    ids = [product["id"] for product in products]
+    try:
+        prices, _ = await S.valio.price(ids, requested, "C-0000")
+        availability, meta = await S.valio.availability(ids, requested, "C-0000")
+    except ValioAPIError as e:
+        raise HTTPException(502, f"Live market snapshot unavailable: {e}") from e
+
+    checked_at = _parse_dt(meta.get("time_now")) or datetime.now(TZ)
+    items = []
+    for product in products:
+        price = _price_info(prices.get(product["id"]))
+        stock = _availability(availability.get(product["id"]), None, requested, checked_at)
+        items.append({
+            "id": product["id"], "name": product["name"], "category": product.get("category") or "unknown",
+            "sales_unit": product["sales_unit"], "unit_price": price.unit_price,
+            "availability": stock.status, "logistic_model": stock.logistic_model,
+            "available_amount": stock.available_amount,
+        })
+
+    priced = [item["unit_price"] for item in items if item["unit_price"] is not None]
+    return {
+        "requested_date": requested.isoformat(), "checked_at": checked_at.isoformat(), "items": items,
+        "summary": {
+            "monitored": len(items), "priced": len(priced), "avg_unit_price": _mean(priced),
+            "available": sum(item["availability"] == "ok" for item in items),
+            "terminal": sum(item["logistic_model"] == "Terminal" for item in items),
+            "attention": sum(item["availability"] in {"partial", "late", "cutoff_passed", "unavailable", "unknown"} for item in items),
+        },
     }
 
 

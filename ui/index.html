@@ -15,6 +15,7 @@
         <span class="brand-word">Aimo</span><span class="brand-tag">Agent Gateway</span>
       </a>
       <nav class="main-nav" aria-label="Main" hidden>
+        <a href="#analytics" data-page="analytics" data-roles="valio">Dashboard</a>
         <a href="#order" data-page="order" data-roles="buyer">Order</a>
         <a href="#orders" data-page="orders" data-roles="buyer">My orders</a>
         <a href="#review" data-page="review" data-roles="valio">Review queue <span class="nav-count" id="nav-review-count" hidden></span></a>
@@ -31,6 +32,46 @@
   </header>
 
   <main>
+    <!-- ======================================================= ADMIN DASHBOARD -->
+    <section id="page-analytics" class="page" hidden>
+      <div class="hero hero-compact">
+        <div class="container">
+          <p class="eyebrow">Valio Aimo · Analytics</p>
+          <h1>Assortment overview</h1>
+          <p class="lead">A purchasing-first view of the signals that need an operator’s attention: price and availability.</p>
+        </div>
+      </div>
+      <div id="analytics-dashboard" class="container analytics-content">
+        <div id="analytics-kpis" class="analytics-kpis" aria-live="polite"></div>
+        <section class="panel analytics-panel market-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">Operational watchlist</p><h2>Price &amp; stock availability</h2></div>
+            <span class="muted small">Live check of a representative assortment sample</span>
+          </div>
+          <div class="analytics-chart-grid">
+            <div id="analytics-price"></div>
+            <div id="analytics-availability"></div>
+          </div>
+          <p id="analytics-market-note" class="chart-caption"></p>
+        </section>
+        <div class="analytics-chart-grid">
+          <section class="panel analytics-panel">
+            <div class="panel-head"><div><p class="eyebrow">Environmental impact</p><h2>Carbon footprint by product group</h2></div></div>
+            <div id="analytics-carbon"></div>
+          </section>
+          <section class="panel analytics-panel">
+            <div class="panel-head"><div><p class="eyebrow">Fulfilment</p><h2>Delivery reliability by product group</h2></div></div>
+            <div id="analytics-reliability"></div>
+          </section>
+        </div>
+        <section class="panel analytics-panel">
+          <div class="panel-head"><div><p class="eyebrow">Data coverage</p><h2>Product group details</h2></div></div>
+          <div id="analytics-categories" class="table-wrap"></div>
+        </section>
+        <p id="analytics-error" class="signin-note" role="alert" hidden></p>
+      </div>
+    </section>
+
     <!-- ======================================================= SIGN IN -->
     <section id="page-signin" class="page" hidden>
       <section class="home-intro" aria-labelledby="home-title">
@@ -225,18 +266,16 @@
     <section id="page-explore" class="page" hidden>
       <div class="hero hero-compact">
         <div class="container">
-          <p class="eyebrow">Assortment</p>
-          <h1>Explore the catalog</h1>
-          <p class="lead">See what exists before you order: how many options match, which ones carry the labels you care
-            about, and how product groups compare on carbon footprint.</p>
+          <p class="eyebrow">Assortment insights</p>
+          <h1>Explore product data</h1>
+          <p class="lead">Explore product-group trends and sustainability information through aggregated statistics. Product, supplier, customer and order-level details are not shown here.</p>
         </div>
       </div>
       <div class="container">
         <form id="explore-form" class="filter-row" novalidate>
-          <input id="explore-q" type="search" placeholder="Search, e.g. burger, milk, salmon, potatoes" aria-label="Search products" value="burger">
+          <input id="explore-q" type="search" placeholder="Filter aggregates, e.g. burger, milk, potatoes" aria-label="Filter product-group aggregates" value="burger">
           <div id="explore-facets" class="facet-chips" role="group" aria-label="Filters"></div>
-          <label class="field-inline date-inline" for="explore-date">Price date <input id="explore-date" type="date"></label>
-          <button class="btn btn-primary btn-small" type="submit">Search</button>
+          <button class="btn btn-primary btn-small" type="submit">Update insights</button>
         </form>
         <div id="explore-body"></div>
       </div>

@@ -345,6 +345,21 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-sp
 .kpi { background: #fff; border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
 .kpi .stat-value { font-size: 30px; }
 .explore-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.explore-chart-grid, .analytics-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.explore-chart-grid .panel, .analytics-chart-grid .panel { min-width: 0; }
+.analytics-content { padding-bottom: 32px; }
+.analytics-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 8px 0 20px; }
+.analytics-kpis .kpi { border: 1px solid rgba(17, 59, 116, .1); border-radius: 18px; box-shadow: 0 4px 16px rgba(16, 44, 83, .05); }
+.analytics-kpis .stat-value { color: var(--Aimo-petrol); }
+.analytics-panel { min-width: 0; margin-bottom: 18px; }
+.analytics-panel .panel-head { align-items: flex-end; }
+.analytics-panel .panel-head .eyebrow { margin-bottom: 4px; }
+.analytics-panel .panel-head h2 { font-size: clamp(20px, 2.4vw, 28px); }
+.analytics-table { min-width: 680px; }
+.analytics-table-wrap { max-height: 420px; overflow: auto; }
+.analytics-table thead { position: sticky; top: 0; z-index: 1; }
+.analytics-table th { background: #edf3fa; }
+[aria-busy="true"] { cursor: progress; }
 
 /* ---------------------------------------------------------------- footer */
 .site-footer { background: var(--Aimo-petrol); color: #fff; padding: 20px 0; margin-top: 56px; font-size: 14px; }
@@ -501,6 +516,13 @@ th { background: #edf3fa; color: #40526e; }
   .brand-tag { font-size: 11px; }
   .hero { padding: 46px 0 34px; }
   .panel { padding: 20px; }
+  .analytics-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .explore-chart-grid, .analytics-chart-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  .analytics-kpis { gap: 8px; }
+  .analytics-kpis .kpi { padding: 11px; }
+  .analytics-kpis .stat-value { font-size: 23px; }
 }
 
 /* ---------------------------------------------------------------- public landing page */

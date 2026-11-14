@@ -1,5 +1,5 @@
-import { $, fmt, h, localISO, nextWeekday, plural, storage } from './dom.js';
-import { barList, hideTip, statusChip, toneChip } from './charts.js';
+import { $, fmt, h, localISO, plural, storage } from './dom.js';
+import { barList, hideTip, toneChip } from './charts.js';
 
 // ====================================================================== state & api
 const S = {
@@ -28,6 +28,7 @@ const S = {
   submitError: null,
   reviewPending: new Set(),
   explore: { filters: new Set(), category: '' },
+  analyticsLoaded: false,
 };
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -92,10 +93,11 @@ function checkItem(c) {
 }
 
 // ====================================================================== status & navigation
-const PAGES = ['order', 'orders', 'review', 'customers', 'audit', 'explore'];
+const PAGES = ['analytics', 'order', 'orders', 'review', 'customers', 'audit', 'explore'];
 // The buyer portal and the Valio Aimo admin see different pages; the server checks the same roles.
-const ROLE_PAGES = { buyer: ['order', 'orders', 'explore'], valio: ['review', 'customers', 'audit', 'explore'] };
+const ROLE_PAGES = { buyer: ['order', 'orders', 'explore'], valio: ['analytics', 'review', 'customers', 'audit', 'explore'] };
 const loaders = {
+  analytics: () => S.analyticsLoaded || loadAnalytics(),
   orders: loadMyOrders, review: loadReview, customers: loadCustomersPage, audit: () => loadAudit(),
   explore: () => S.exploreLoaded || runExplore(),
 };
@@ -1011,6 +1013,107 @@ async function loadAudit(subject = S.auditSubject) {
     : [h('li', { class: 'empty', text: 'No events yet. Place an order to see the trail.' })]));
 }
 
+// ====================================================================== analytics dashboard
+function analyticsTable(headers, rows, className = '') {
+  return h('table', { class: className },
+    h('thead', {}, h('tr', {}, headers.map((header) => h('th', { text: header })))),
+    h('tbody', {}, rows));
+}
+
+async function loadAnalytics() {
+  const root = $('#analytics-dashboard');
+  if (!root) return;
+  root.setAttribute('aria-busy', 'true');
+  $('#analytics-error').hidden = true;
+  try {
+    const data = await api('/api/admin/analytics');
+    let market;
+    try {
+      market = await api('/api/admin/market-snapshot');
+    } catch (error) {
+      market = { error: error.message, items: [], summary: { monitored: 0, priced: 0, available: 0, terminal: 0, attention: 0, avg_unit_price: null } };
+    }
+    renderAnalytics(data, market);
+    S.analyticsLoaded = true;
+  } catch (error) {
+    $('#analytics-error').textContent = error.message;
+    $('#analytics-error').hidden = false;
+  } finally {
+    root.removeAttribute('aria-busy');
+  }
+}
+
+function renderAnalytics(data, market) {
+  const { summary, categories } = data;
+  const watch = market.summary;
+  $('#analytics-kpis').replaceChildren(
+    kpi('Watchlist available', market.error ? 'n/a' : `${fmt.num(watch.available)} / ${fmt.num(watch.monitored)}`, market.error ? 'Live check unavailable' : `${fmt.num(watch.attention)} needs attention`),
+    kpi('Average unit price', watch.avg_unit_price == null ? 'n/a' : fmt.eur(watch.avg_unit_price), `${fmt.num(watch.priced)} live prices returned`),
+    kpi('Supplier fulfilment', fmt.num(watch.terminal), 'items supplied from terminal stock'),
+    kpi('Products analysed', fmt.num(summary.products), `${fmt.num(summary.categories)} product groups`),
+    kpi('Average carbon footprint', summary.avg_co2 == null ? 'n/a' : fmt.num(summary.avg_co2, 2), `kg CO₂e/kg · ${fmt.num(summary.carbon_products)} products with data`),
+    kpi('Delivery reliability', fmt.pct(summary.avg_reliability), `${fmt.num(summary.reliability_products)} products with data`),
+  );
+
+  const priced = market.items.filter((item) => item.unit_price != null).sort((a, b) => b.unit_price - a.unit_price);
+  $('#analytics-price').replaceChildren(
+    h('h3', { text: 'Price watch' }),
+    market.error ? h('p', { class: 'empty', text: 'Live price data is unavailable.' }) : barList(priced.map((item) => ({
+      id: item.id, label: item.name, sublabel: `Category ${item.category} · per ${unitWord(item.sales_unit)}`,
+      value: item.unit_price, valueText: fmt.eur(item.unit_price),
+      tooltip: [['Product', item.name], ['Unit price', fmt.eur(item.unit_price)], ['Availability', item.availability]],
+    })), { ariaLabel: 'Live unit prices in the operational watchlist' }),
+  );
+  const availabilityGroups = [
+    ['Available now', market.items.filter((item) => item.availability === 'ok').length, 'good'],
+    ['Supplier / terminal', market.items.filter((item) => item.logistic_model === 'Terminal').length, 'info'],
+    ['Needs attention', watch.attention, 'warning'],
+  ];
+  $('#analytics-availability').replaceChildren(
+    h('h3', { text: 'Availability watch' }),
+    market.error ? h('p', { class: 'empty', text: 'Live availability data is unavailable.' }) : barList(availabilityGroups.map(([label, value, kind]) => ({ id: label, label, sublabel: 'of monitored products', value, valueText: fmt.num(value), tags: [{ text: kind === 'good' ? 'ready' : kind, kind }] })), { ariaLabel: 'Availability status in the operational watchlist' }),
+  );
+  $('#analytics-market-note').textContent = market.error
+    ? `Live price and stock checks are unavailable: ${market.error}`
+    : `Checked ${fmt.time(market.checked_at)} for delivery on ${fmt.day(market.requested_date)}. The watchlist is limited to ${fmt.num(watch.monitored)} representative SKUs to respect Valio Aimo API usage limits.`;
+
+  const carbonGroups = categories.filter((group) => group.avg_co2 != null)
+    .sort((a, b) => b.avg_co2 - a.avg_co2).slice(0, 12);
+  const reliabilityGroups = categories.filter((group) => group.avg_reliability != null)
+    .sort((a, b) => a.avg_reliability - b.avg_reliability).slice(0, 12);
+  $('#analytics-carbon').replaceChildren(barList(carbonGroups.map((group) => ({
+    id: group.category,
+    label: group.category,
+    sublabel: `${fmt.num(group.products)} products · ${fmt.num(group.carbon_products)} carbon records`,
+    value: group.avg_co2,
+    valueText: `${fmt.num(group.avg_co2, 2)} kg CO₂e/kg`,
+    tooltip: [['Products', fmt.num(group.products)], ['Carbon data coverage', fmt.num(group.carbon_products)]],
+  })), { ariaLabel: 'Highest average carbon footprint by product group' }),
+  h('p', { class: 'chart-caption', text: `Highest averages · ${fmt.num(categories.filter((group) => group.avg_co2 != null).length)} groups with carbon data` }));
+  $('#analytics-reliability').replaceChildren(barList(reliabilityGroups.map((group) => ({
+    id: group.category,
+    label: group.category,
+    sublabel: `${fmt.num(group.products)} products · ${fmt.num(group.reliability_products)} reliability records`,
+    value: group.avg_reliability,
+    valueText: fmt.pct(group.avg_reliability),
+    tooltip: [['Products', fmt.num(group.products)], ['Reliability data coverage', fmt.num(group.reliability_products)]],
+  })), { ariaLabel: 'Lowest average delivery reliability by product group' }),
+  h('p', { class: 'chart-caption', text: `Lowest averages · ${fmt.num(categories.filter((group) => group.avg_reliability != null).length)} groups with reliability data` }));
+
+  const categoryRows = categories.map((group) => h('tr', {},
+    h('td', { text: group.category }),
+    h('td', { class: 'num', text: fmt.num(group.products) }),
+    h('td', { class: 'num', text: fmt.num(group.carbon_products) }),
+    h('td', { class: 'num', text: group.avg_co2 == null ? 'n/a' : fmt.num(group.avg_co2, 3) }),
+    h('td', { class: 'num', text: fmt.num(group.reliability_products) }),
+    h('td', { class: 'num', text: fmt.pct(group.avg_reliability) })));
+  $('#analytics-categories').replaceChildren(h('div', { class: 'table-wrap analytics-table-wrap' }, analyticsTable(
+    ['Product group', 'Products', 'Carbon records', 'Avg. kg CO₂e/kg', 'Reliability records', 'Avg. reliability'],
+    categoryRows,
+    'analytics-table',
+  )));
+}
+
 // ====================================================================== explore page
 async function runExplore() {
   S.exploreLoaded = true;
@@ -1019,7 +1122,7 @@ async function runExplore() {
   if (q.length < 2) { body.replaceChildren(h('p', { class: 'empty', text: 'Type at least two letters.' })); return; }
   body.classList.add('is-refreshing');
   try {
-    const params = new URLSearchParams({ q, filters: [...S.explore.filters].join(','), category: S.explore.category, limit: '40' });
+    const params = new URLSearchParams({ q, filters: [...S.explore.filters].join(','), category: S.explore.category });
     const res = await api(`/api/catalog/search?${params}`);
     renderFacets(res.facets);
     renderExplore(res);
@@ -1043,67 +1146,54 @@ function kpi(label, value, sub) {
 
 function renderExplore(res) {
   const k = res.kpis;
-  const withCo2 = res.groups.filter((g) => g.co2 != null);
-  const chart = withCo2.length ? barList(withCo2.map((g) => ({
+  const carbonGroups = res.groups.filter((g) => g.co2 != null)
+    .sort((a, b) => b.co2 - a.co2).slice(0, 12);
+  const reliabilityGroups = res.groups.filter((g) => g.reliability != null)
+    .sort((a, b) => a.reliability - b.reliability).slice(0, 12);
+  const carbonChart = carbonGroups.length ? barList(carbonGroups.map((g) => ({
     id: g.category,
-    label: g.example,
-    sublabel: `Product group ${g.category} · ${fmt.num(g.count)} ${plural('product', g.count)} · reliability ${fmt.pct(g.reliability)}`,
+    label: `Product group ${g.category}`,
+    sublabel: `${fmt.num(g.count)} ${plural('product', g.count)} · avg. delivery reliability ${fmt.pct(g.reliability)}`,
     value: g.co2,
-    valueText: `${fmt.num(g.co2, 2)} kg`,
+    valueText: `${fmt.num(g.co2, 2)} kg CO₂e/kg`,
     selected: g.category === S.explore.category,
     tooltip: [['Product group', g.category], ['Products here', fmt.num(g.count)], ['Avg kg CO₂e per kg', fmt.num(g.co2, 3)], ['Avg delivery reliability', fmt.pct(g.reliability)]],
   })), {
-    ariaLabel: 'Carbon footprint by product group',
+    ariaLabel: 'Aggregated carbon footprint by product group',
     onSelect: (cat) => { S.explore.category = S.explore.category === cat ? '' : cat; runExplore(); },
-  }) : h('p', { class: 'empty', text: 'No carbon-footprint data for these products.' });
+  }) : h('p', { class: 'empty', text: 'No carbon-footprint data for these product groups.' });
+  const reliabilityChart = reliabilityGroups.length ? barList(reliabilityGroups.map((g) => ({
+    id: g.category,
+    label: `Product group ${g.category}`,
+    sublabel: `${fmt.num(g.count)} ${plural('product', g.count)}`,
+    value: g.reliability,
+    valueText: fmt.pct(g.reliability),
+    selected: g.category === S.explore.category,
+    tooltip: [['Product group', g.category], ['Products here', fmt.num(g.count)], ['Avg delivery reliability', fmt.pct(g.reliability)]],
+  })), {
+    ariaLabel: 'Aggregated delivery reliability by product group',
+    onSelect: (cat) => { S.explore.category = S.explore.category === cat ? '' : cat; runExplore(); },
+  }) : h('p', { class: 'empty', text: 'No delivery-reliability data for these product groups.' });
 
-  const table = h('div', { class: 'table-wrap' }, h('table', {},
-    h('thead', {}, h('tr', {}, ['Product', 'Group', 'Sold as', 'Claims & labels', 'Reliability', 'kg CO₂e/kg', 'Price & stock'].map((t, i) =>
-      h('th', { class: [4, 5].includes(i) ? 'num' : null, text: t })))),
-    h('tbody', {}, res.results.map((p) => {
-      const cell = h('td', {}, h('button', { class: 'btn btn-small', type: 'button', text: 'Check', onClick: () => quote(p, cell) }));
-      const chips = [...(p.claims || []).map((c) => S.vocab.claims[c]).filter(Boolean), ...(p.labels || []).map((l) => S.vocab.labels[l]).filter(Boolean)].slice(0, 4);
-      return h('tr', {},
-        h('td', {}, p.name, h('span', { class: 'cell-sub', text: [p.brand, p.id, p.country?.toUpperCase()].filter(Boolean).join(' · ') })),
-        h('td', { text: p.category }),
-        h('td', { text: `${unitWord(p.sales_unit)} (${p.sales_unit})${p.content ? ` · ${fmt.num(p.content, 2)} ${p.content_unit}` : ''}` }),
-        h('td', {}, chips.length ? h('div', { class: 'mini-chips' }, chips.map((c) => h('span', { class: 'mini-chip', text: c }))) : '–'),
-        h('td', { class: 'num', text: fmt.pct(p.reliability) }),
-        h('td', { class: 'num', text: p.co2 != null ? fmt.num(p.co2, 2) : 'n/a' }),
-        cell);
-    }))));
-
-  const groupNote = res.groups_total > withCo2.length
-    ? `Showing ${withCo2.length} of ${res.groups_total} product groups (groups without CO₂e data are left out).` : '';
   $('#explore-body').replaceChildren(
     h('div', { class: 'kpi-row' },
-      kpi('Products found', fmt.num(k.total), `for “${res.phrases.join(' / ')}”`),
+      kpi('Products in view', fmt.num(k.total), 'matches the selected search and filters'),
+      kpi('With carbon data', fmt.num(k.with_co2), k.total ? `${fmt.pct(k.with_co2 / k.total)} of results` : null),
+      kpi('Avg carbon footprint', k.avg_co2 == null ? 'n/a' : `${fmt.num(k.avg_co2, 2)} kg CO₂e/kg`),
       kpi('With delivery data', fmt.num(k.with_reliability), k.total ? `${fmt.pct(k.with_reliability / k.total)} of results` : null),
       kpi('Avg delivery reliability', fmt.pct(k.avg_reliability), 'share of ordered quantity delivered'),
-      kpi('Product groups', fmt.num(res.groups_total), S.explore.category ? `filtered to group ${S.explore.category}` : 'click a bar below to filter')),
-    h('section', { class: 'panel item-panel' },
-      h('div', { class: 'panel-head' }, h('h3', { text: 'Carbon footprint by product group' }),
-        h('span', { class: 'muted small', text: 'kg CO₂e per kg, average of the product group (not per product)' })),
-      chart,
-      h('p', { class: 'chart-caption', text: `Choose a group to filter the list below; choose it again to clear. ${groupNote}` })),
-    h('section', { class: 'panel item-panel' },
-      h('div', { class: 'panel-head' }, h('h3', { text: `Products${S.explore.category ? ` in group ${S.explore.category}` : ''}` }),
-        h('span', { class: 'muted small', text: `first ${res.results.length} of ${fmt.num(res.total)} · live price and stock only for products you check, as Valio Aimo’s API guidelines ask` })),
-      table));
-}
-
-async function quote(p, cell) {
-  cell.replaceChildren(h('span', { class: 'muted small', text: 'Checking…' }));
-  try {
-    const day = $('#explore-date').value || nextWeekday();
-    const res = await api('/api/catalog/quote', { method: 'POST', body: { product_ids: [p.id], requested_date: day } });
-    const r = res[p.id];
-    const price = r.price.unit_price != null ? `${fmt.eur(r.price.unit_price)} / ${unitWord(p.sales_unit)}` : 'no price';
-    const cmp = r.price.comparison_price != null ? ` · ${fmt.eur(r.price.comparison_price)}/${r.price.comparison_unit}` : '';
-    cell.replaceChildren(h('div', {}, h('strong', { text: price }), h('span', { class: 'cell-sub', text: `${cmp.replace(' · ', '')} for ${fmt.day(day)}` }), statusChip(r.availability.status)));
-  } catch (e) {
-    cell.replaceChildren(h('span', { class: 'hint bad', text: e.message }));
-  }
+      kpi('Product groups', fmt.num(res.groups_total), S.explore.category ? `filtered to group ${S.explore.category}` : 'aggregate view')),
+    h('div', { class: 'explore-chart-grid' },
+      h('section', { class: 'panel item-panel' },
+        h('div', { class: 'panel-head' }, h('h3', { text: 'Carbon footprint by group' }),
+          h('span', { class: 'muted small', text: 'Average kg CO₂e per kg' })),
+        carbonChart,
+        h('p', { class: 'chart-caption', text: `Highest averages among ${fmt.num(carbonGroups.length)} groups shown. Select a group to filter the metrics.` })),
+      h('section', { class: 'panel item-panel' },
+        h('div', { class: 'panel-head' }, h('h3', { text: 'Delivery reliability by group' }),
+          h('span', { class: 'muted small', text: 'Share of ordered quantity delivered' })),
+        reliabilityChart,
+        h('p', { class: 'chart-caption', text: `Lowest averages among ${fmt.num(reliabilityGroups.length)} groups shown. Select a group to filter the metrics.` }))));
 }
 
 // ====================================================================== sign-in
@@ -1201,7 +1291,6 @@ async function init() {
   showPortal();
   try { S.vocab = await api('/api/vocab'); } catch { /* keep defaults */ }
   try { S.customers = await api('/api/customers'); } catch (e) { setStatus(e.message, true); }
-  $('#explore-date').value = nextWeekday();
   $('#explore-form').addEventListener('submit', (e) => { e.preventDefault(); S.explore.category = ''; runExplore(); });
 
   if (S.session.role === 'buyer') {

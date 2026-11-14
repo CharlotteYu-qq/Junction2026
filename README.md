@@ -21,10 +21,11 @@ The site opens on a buyer-focused landing page. Buyers sign in there; Valio Aimo
 |---|---|---|
 | Buyer | **Order** | Type a need in plain words (English or basic Finnish). The agent shows what it understood (you can edit it), the steps it ran, ranked options per item with live prices and stock, and the decision: placed automatically, sent to Valio Aimo for approval, or blocked |
 | Buyer | **My orders** | Your orders and what happened to each: placed automatically, waiting for Valio Aimo, or decided by a named person |
+| Valio Aimo | **Dashboard** | Portfolio analytics for carbon footprint, delivery reliability, product-group data coverage and country of origin |
 | Valio Aimo | **Review queue** | Orders that need a person, each with the reasons, the order lines, the request and the agent's rationale. Approving can also verify a new customer |
 | Valio Aimo | **Customers** | The whitelist: trust status, Y-tunnus checksum, auto-approval limit and hard allergen rules. You can register a new customer |
 | Valio Aimo | **Audit trail** | Every step by the customer, agent, policy and people, in plain language and hash-chained |
-| Both | **Explore** | Catalog explorer with label/diet filters and a carbon-footprint-by-product-group chart that you can click to filter |
+| Both | **Explore** | Search and filter aggregate product-group insights; product and supplier records, prices, customers and orders are not exposed |
 
 Sign in as a buyer and use the example buttons on the Order page for the demo scenarios.
 
