@@ -47,7 +47,7 @@ async def parse_conversation(
         from agent import claude_parser
 
         try:
-            parsed, suggested = await claude_parser.parse_dialogue(turns, today, model, meta)
+            parsed, suggested = await claude_parser.parse_dialogue(turns, today, model, meta, current=previous)
         except Exception as e:  # never let the LLM path break ordering
             note = f"Claude parser unavailable ({type(e).__name__}: {str(e)[:120]}): used the rule-based parser"
             if meta is not None:

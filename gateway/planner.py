@@ -5,6 +5,7 @@ parse -> search catalog -> get prices -> check availability -> rank -> sign.
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import time
@@ -31,6 +32,9 @@ from trust.signing import Signer, content_hash
 
 SHORTLIST = 12
 UNLIMITED = 1_000_000  # the mock returns 9 999 999 999 for stocked items, 999 999 for supplier items
+USUAL_POINTS = 30.0   # the customer's usual product first, unless it misses a requirement or is less available
+USUAL_PRODUCTS = 3    # the usual products added to the shortlist of an item
+UNKNOWN_STOCK = 999_999  # Valio: availableAmount >= this means "stock not known", not a real count
 STATUS_POINTS = {"ok": 3, "partial": 1, "late": 1, "cutoff_passed": 1, "unknown": 0, "unavailable": -2}
 # Carbon footprint as a tie-breaker: options whose totals differ by at most this share count as the same price,
 # and their other points (match, availability, relevance, reliability) may differ by at most CO2_OTHER_POINTS.
@@ -149,15 +153,20 @@ def _availability(row: dict | None, qty: float | None, requested: date, time_now
     available_date = date.fromisoformat(line["availableDate"][:10]) if line.get("availableDate") else None
     out = Availability(available_amount=amount, available_date=available_date, **base)
     terminal = model == "Terminal"
+    # Valio: an amount of 999999 or more means the stock is not known and any quantity can be ordered
+    # (typically Terminal products that are not restocked by Valio Aimo).
+    unknown_stock = amount is not None and amount >= UNKNOWN_STOCK
     if terminal:
         out.note = "Delivered from the supplier's warehouse: Valio Aimo can't see the actual stock"
+    elif unknown_stock:
+        out.note = "Stock is not tracked for this product: any quantity can be ordered"
     if amount is not None and amount <= 0:
         out.status, out.note = "unavailable", "0 available"
     elif available_date and available_date > requested:
         out.status = "late"
     elif closing and closing < time_now:
         out.status = "cutoff_passed"
-    elif qty is not None and amount is not None and not terminal and amount < qty:
+    elif qty is not None and amount is not None and not terminal and not unknown_stock and amount < qty:
         out.status = "partial"
     else:
         out.status = "ok"
@@ -196,12 +205,19 @@ def _candidate(p: dict, match: float, meets: bool, notes: list[str], req: Reques
     )
 
 
-def _rank(cands: list[Candidate]) -> None:
+def _rank(cands: list[Candidate], usual: dict[str, int] | None = None) -> None:
+    """Score and sort the options. `usual`: how often the customer bought each product for this item; the
+    product they buy most gets up to USUAL_POINTS, enough to beat a cheaper or closer match but never a
+    missing requirement (100) or a worse availability (25 a step); it also counts as the best match."""
     totals = [c.line_total for c in cands if c.line_total is not None]
     lo, hi = (min(totals), max(totals)) if totals else (0.0, 0.0)
     good = [c.line_total for c in cands if c.line_total is not None and c.meets_constraints and c.availability.status == "ok"]
     good_lo = min(good) if good else None
     other_points: dict[str, float] = {}  # score without the price part, for the CO2e tie-breaker
+    bought = sum((usual or {}).values())
+    top = max((usual or {}).values(), default=0)  # the product bought most gets all the points, others in proportion
+    usual_pts = {pid: USUAL_POINTS * n / top for pid, n in (usual or {}).items()} if top else {}
+    best_match = max((c.match_score for c in cands), default=0.0)
     for c in cands:
         cost_pts = 0.0
         if c.line_total is not None:
@@ -210,14 +226,18 @@ def _rank(cands: list[Candidate]) -> None:
         c.score = round(
             (100 if c.meets_constraints else 0)
             + 25 * STATUS_POINTS.get(c.availability.status, 0)
-            + 4 * min(c.match_score, 10)  # relevance first: the right product beats a cheaper wrong one
+            # relevance first: the right product beats a cheaper wrong one (the usual product is the right one)
+            + 4 * min(best_match if c.product_id in usual_pts else c.match_score, 10)
             + cost_pts
             + (10 * rel if rel is not None else 5)
-            + (0 if c.line_total is not None else -60),
+            + (0 if c.line_total is not None else -60)
+            + usual_pts.get(c.product_id, 0.0),
             2,
         )
         other_points[c.product_id] = c.score - cost_pts
         reasons = []
+        if usual and usual.get(c.product_id):
+            reasons.append(f"your usual choice ({usual[c.product_id]} of your {bought} orders)")
         reasons.append("meets the request" if c.meets_constraints else "substitute: " + ", ".join(c.constraint_notes))
         reasons.append(
             {
@@ -295,6 +315,7 @@ async def build_offer(
     valio: ValioClient,
     signer: Signer,
     ttl_minutes: int,
+    preferred: list | None = None,
 ) -> Offer:
     now = datetime.now(TZ)
     ops: list[Operation] = []
@@ -339,6 +360,15 @@ async def build_offer(
                     if not hard:
                         shortlist.append((sp, max(score - 1, 0.5), ok, notes, f"Valio Aimo substitute for {p['id']}"))
                         ids.add(sid)
+        # the products this customer usually buys for this item, so the usual one can be recommended
+        usual = preferred[len(shortlists)] if preferred and len(shortlists) < len(preferred) else {}
+        for pid, _ in sorted(usual.items(), key=lambda kv: -kv[1])[:USUAL_PRODUCTS]:
+            up = catalog.by_id.get(pid)
+            if up and pid not in ids:
+                ok, notes, hard = constraint_check(up, item.constraints, customer)
+                if not hard:
+                    shortlist.append((up, 1.0, ok, notes, ""))
+                    ids.add(pid)
         shortlists.append(shortlist)
         cons = describe_constraints(item)
         n_excluded = len(matches) - len(evaluated)
@@ -366,23 +396,33 @@ async def build_offer(
     }
     if ids:
         t = time.perf_counter()
-        try:
-            prices, meta = await valio.price(ids, parsed.delivery_date, customer.id)
+        # price and availability are independent: ask both at once
+        price_res, avail_res = await asyncio.gather(
+            valio.price(ids, parsed.delivery_date, customer.id),
+            valio.availability(ids, parsed.delivery_date, customer.id),
+            return_exceptions=True,
+        )
+        ms = int((time.perf_counter() - t) * 1000)
+        if isinstance(price_res, ValioAPIError):
+            op("get_price", f"Price API failed: {price_res}", "failed", ms)
+        elif isinstance(price_res, BaseException):
+            raise price_res
+        else:
+            prices, meta = price_res
             found = sum(1 for pid in ids if not _price_info(prices.get(pid)).error)
             op("get_price", f"POST /api/price for {len(ids)} products on {parsed.delivery_date:%d %b}: {found} prices"
-               + (f" ({meta['from_cache']} from cache)" if meta.get("from_cache") else ""), ms=int((time.perf_counter() - t) * 1000))
+               + (f" ({meta['from_cache']} from cache)" if meta.get("from_cache") else ""), ms=ms)
             source["currency"] = meta.get("currency") or "EUR"
-        except ValioAPIError as e:
-            op("get_price", f"Price API failed: {e}", "failed", int((time.perf_counter() - t) * 1000))
-        t = time.perf_counter()
-        try:
-            avail, meta = await valio.availability(ids, parsed.delivery_date, customer.id)
+        if isinstance(avail_res, ValioAPIError):
+            op("check_availability", f"Availability API failed: {avail_res}", "failed", ms)
+        elif isinstance(avail_res, BaseException):
+            raise avail_res
+        else:
+            avail, meta = avail_res
             time_now = _parse_dt(meta.get("time_now")) or now
             source["time_now"] = time_now.isoformat()
             op("check_availability", f"POST /api/availability for {len(ids)} products: answers for {len(avail)}"
-               + (f" ({meta['from_cache']} from cache)" if meta.get("from_cache") else ""), ms=int((time.perf_counter() - t) * 1000))
-        except ValioAPIError as e:
-            op("check_availability", f"Availability API failed: {e}", "failed", int((time.perf_counter() - t) * 1000))
+               + (f" ({meta['from_cache']} from cache)" if meta.get("from_cache") else ""), ms=ms)
     else:
         op("get_price", "Nothing to price: no products matched", "skipped")
         op("check_availability", "Nothing to check", "skipped")
@@ -397,7 +437,7 @@ async def build_offer(
             c = _candidate(p, score, ok, notes, item, prices.get(p["id"]), avail.get(p["id"]), parsed.delivery_date, time_now)
             c.rank_reason = origin
             cands.append(c)
-        _rank(cands)
+        _rank(cands, preferred[len(items)] if preferred and len(items) < len(preferred) else None)
         rec = _recommend(cands)
         n_meet = sum(1 for c in cands if c.meets_constraints)
         n_on_time = sum(1 for c in cands if c.availability.status == "ok")

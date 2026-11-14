@@ -32,7 +32,8 @@ const S = {
   submissionPending: false,
   submitError: null,
   reviewPending: new Set(),
-  explore: { filters: new Set(), category: '' },
+  explore: { group: '', department: '', category: '' },
+  departments: null,
 };
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -182,43 +183,41 @@ async function renderExamples() {
   $('#examples').replaceChildren(
     h('span', { class: 'muted small', text: suggested.length ? 'Suggestions based on your order history:' : 'Try:' }),
     ...shown.map((ex) => h('button', {
-      type: 'button', class: 'example', text: ex.label, title: ex.explain || ex.text,
+      type: 'button', class: 'example', text: ex.label, title: ex.reason || ex.text,
       disabled: S.requestPending || S.submissionPending,
       onClick: () => {
         newRequest({ focus: false }); // an example starts a new conversation
         $('#request-text').value = ex.text;
         sendMessage();
       },
-    })),
-    suggested.length ? rankingDetails(res) : null);
+    })));
+  remindDue(suggested);
 }
 
-// The ranking is a published formula: show it, and every input and component, for the top items.
-function rankingDetails(res) {
-  const f = res.formula;
-  const picked = new Set(res.suggestions.map((s) => s.item));
-  const unit = (u) => (u === 'L' ? 'L' : 'kg');
-  const num = (v) => (v == null ? '–' : Number(v).toFixed(2));
-  return h('details', { class: 'suggest-why' },
-    h('summary', { text: 'How are these suggestions ranked?' }),
-    h('p', { class: 'formula' }, h('code', { text: f.score })),
-    h('ul', { class: 'formula-terms' },
-      Object.values(f.components).map((t) => h('li', { text: t })),
-      f.rules.map((t) => h('li', { class: 'muted', text: t }))),
-    h('div', { class: 'table-wrap' }, h('table', { class: 'rank-table' },
-      h('thead', {}, h('tr', {}, ['Item', 'Usual amount', 'T (days)', 'd (days)', 'Due', 'Frequency', 'Regularity', 'Trend', 'Score']
-        .map((t, k) => h('th', { class: k ? 'num' : null, text: t })))),
-      h('tbody', {}, res.ranked.map((i) => h('tr', { class: picked.has(i.item) ? 'is-picked' : null },
-        h('td', {}, i.item, picked.has(i.item) ? h('span', { class: 'tag tag-rec', text: 'Suggested' }) : null,
-          i.paused ? h('span', { class: 'cell-sub', text: `Paused: not bought for over ${fmt.num(3 * i.interval)} days` }) : null),
-        h('td', { class: 'num', text: `${fmt.num(i.quantity)} ${unit(i.unit)}` }),
-        h('td', { class: 'num', text: fmt.num(i.interval, 1) }),
-        h('td', { class: 'num', text: fmt.num(i.since) }),
-        h('td', { class: 'num', text: num(i.components.due) }),
-        h('td', { class: 'num', text: num(i.components.frequency) }),
-        h('td', { class: 'num', text: num(i.components.regularity) }),
-        h('td', { class: 'num', text: num(i.components.trend) }),
-        h('td', { class: 'num' }, h('strong', { text: num(i.score) }))))))));
+// The agent speaks first when, by the customer's own rhythm, something is due (Due >= 0.5: at least the
+// usual number of days since the last delivery). Nothing is ordered until the buyer says yes.
+function remindDue(suggested) {
+  const due = suggested.find((s) => (s.components?.due ?? 0) >= 0.5);
+  if (!due || S.chat.messages.length) return;
+  const what = due.item.charAt(0).toUpperCase() + due.item.slice(1);
+  S.pendingReminder = due;
+  say(`${what} is due by your usual rhythm. ${due.reason} Shall I check prices and stock for ${due.text}?`,
+    { aside: true, action: 'remind' });
+}
+
+function acceptReminder() {
+  const due = S.pendingReminder;
+  if (!due) return;
+  newRequest({ focus: false });
+  $('#request-text').value = due.text;
+  sendMessage();
+}
+
+function dismissReminder() {
+  S.pendingReminder = null;
+  S.chat.messages = S.chat.messages.filter((m) => m.action !== 'remind');
+  renderThread();
+  $('#request-text').focus();
 }
 
 // ---------------------------------------------------------------------- conversation with the agent
@@ -228,6 +227,7 @@ function renderThread() {
   const msgs = S.chat.messages;
   const last = msgs[msgs.length - 1];
   const waiting = last?.role === 'agent' && last.question;
+  const talking = msgs.some((m) => m.action !== 'remind'); // the reminder alone does not start a conversation
   $('#chat-thread').hidden = msgs.length === 0;
   $('#chat-thread').replaceChildren(...msgs.map((m) => h('div', { class: `chat-msg chat-${m.role}` },
     h('span', { class: 'chat-who', text: m.role === 'buyer' ? (currentCustomer()?.name || 'You') : 'Ordering agent' }),
@@ -237,24 +237,41 @@ function renderThread() {
       type: 'button', class: 'link-button chat-skip', text: 'Show options with what you know so far',
       disabled: S.requestPending, onClick: () => sendMessage({ skip: true }),
     }) : null,
+    m === last && m.action === 'remind' && S.pendingReminder ? h('div', { class: 'chat-actions' },
+      h('button', { type: 'button', class: 'btn btn-primary btn-small', text: 'Yes, check it', onClick: acceptReminder }),
+      h('button', { type: 'button', class: 'btn btn-small', text: 'Not now', onClick: dismissReminder })) : null,
     m === last && m.action === 'cancel' && S.pendingCancel ? h('div', { class: 'chat-actions' },
       h('button', { type: 'button', class: 'btn btn-primary btn-small', text: 'Yes, cancel it', onClick: confirmCancel }),
       h('button', { type: 'button', class: 'btn btn-small', text: 'No, keep it', onClick: keepOrder })) : null,
     m.action === 'orders' ? h('a', { class: 'chat-action link-button', href: '#orders', text: 'See my orders' }) : null)));
   $('#chat-thread').lastElementChild?.scrollIntoView({ block: 'nearest' }); // keep the newest message in view
-  $('#request-label').textContent = waiting ? 'Your answer' : msgs.length ? 'Anything to change or add?' : 'Your request';
-  $('#request-text').placeholder = waiting ? 'e.g. 200 litres, delivered on Friday' : 'e.g. I need 1,000 litres of lactose-free milk by Monday';
-  $('#run-btn').textContent = msgs.length ? 'Send' : 'Find the best option';
+  $('#request-label').textContent = waiting ? 'Your answer' : talking ? 'Anything to change or add?' : 'Your request';
+  $('#request-text').placeholder = waiting ? 'e.g. 200 litres, delivered on Friday'
+    : talking ? 'e.g. add 10 kg butter, or deliver on Thursday' : 'e.g. the usual milk for Friday, or 1,000 litres of lactose-free milk by Monday';
+  $('#run-btn').textContent = talking ? 'Send' : 'Find the best option';
 }
 
-function offerSummary(offer) {
+// When the order cannot be placed, the agent says what it can do instead (the fixes come checked from the server).
+function fixesSummary(decision) {
+  if (decision?.outcome !== 'reject') return '';
+  const fixes = decision.fixes || [];
+  const why = (decision.summary || '').replace(/^Blocked: /, '').replace(/[.;:]? ?revise the request.*$/i, '');
+  if (!fixes.length) return ` It can't be placed as it is${why ? ` (${why})` : ''}, and I found no change that would make it work right now. Tell me what to change, for example another product or day.`;
+  return ` It can't be placed as it is${why ? ` (${why})` : ''}, so here is what I can do: ${fixes.map((f, k) => `(${k + 1}) ${f.title}`).join('; ')}. Pick one next to the total.`;
+}
+
+function offerSummary(offer, decision, { habits = [], updated = false } = {}) {
   const p = offer.parsed;
+  const history = habits.length ? `From your order history: ${habits.join('; ')}. ` : '';
   const wants = p.items.map((it) => itemTitle(it)).join('; ') || 'no products recognised';
   const picks = offer.items.map((item) => item.candidates.find((c) => c.product_id === item.recommended_product_id))
     .filter(Boolean).map((c) => `${c.name} × ${fmt.num(c.quantity, 2)} ${unitLabel(c.sales_unit, c.quantity)} = ${fmt.eur(c.line_total)}`);
-  return `Got it: ${wants}, delivery ${fmt.day(p.delivery_date)}. `
-    + (picks.length ? `I checked prices and stock with Valio Aimo. I recommend ${picks.join('; ')}. Choose an option below and place the order.`
-      : 'I found no option that can be ordered right now: see the options below, or tell me what to change.');
+  const blocked = decision?.outcome === 'reject';
+  return history + `${updated ? 'Updated the order' : 'Got it'}: ${wants}, delivery ${fmt.day(p.delivery_date)}. `
+    + (picks.length
+      ? `I checked prices and stock with Valio Aimo. ${blocked ? 'My best match is' : 'I recommend'} ${picks.join('; ')}.${blocked ? '' : ' Choose an option below and place the order.'}`
+      : (blocked ? '' : 'I found no option that can be ordered as asked.'))
+    + fixesSummary(decision);
 }
 
 function say(text, extra = {}) {
@@ -314,7 +331,14 @@ async function sendMessage({ skip = false } = {}) {
     if (CONFIRM_YES.test(text)) await confirmCancel(); else keepOrder();
     return;
   }
+  if (!skip && text && S.pendingReminder && (CONFIRM_YES.test(text) || CONFIRM_NO.test(text))) {
+    if (CONFIRM_YES.test(text)) acceptReminder(); else { $('#request-text').value = ''; dismissReminder(); }
+    return;
+  }
   if (!skip && !text) { setStatus('Write what you need first.', true); $('#request-text').focus(); return; }
+  if (S.pendingReminder) { // the buyer asked for something else: the reminder stays as a note
+    S.pendingReminder = null;
+  }
   S.pendingCancel = null; // anything else the buyer says leaves the cancellation unanswered
   if (!skip && S.submitted && S.chat.from < S.chat.messages.length) {
     S.chat.from = S.chat.messages.length; // that order is done: this message starts a new one
@@ -348,8 +372,9 @@ async function sendMessage({ skip = false } = {}) {
       setStatus('');
       return;
     }
+    const updated = S.chat.messages.slice(S.chat.from).some((m) => m.offer); // a change to the order on the table
     showOffer(res);
-    S.chat.messages.push({ role: 'agent', text: offerSummary(res.offer), notice: res.notice });
+    S.chat.messages.push({ role: 'agent', text: offerSummary(res.offer, res.decision, { habits: res.habits || [], updated }), notice: res.notice, offer: true });
   } catch (e) {
     if (version !== S.requestVersion) return;
     setStatus(e.message, true);
@@ -448,7 +473,7 @@ async function runRequest(override) {
       return;
     }
     showOffer(res, { scroll: false });
-    say(offerSummary(res.offer), { notice: res.notice });
+    say(offerSummary(res.offer, res.decision, { updated: true }), { notice: res.notice, offer: true });
   } catch (e) {
     if (version === S.requestVersion) setStatus(e.message, true);
   } finally {
@@ -659,7 +684,7 @@ function availabilityText(c) {
 
 function candTooltip(c) {
   const a = c.availability;
-  const amount = a.available_amount == null ? '–' : a.available_amount >= 1e6 ? (a.logistic_model === 'Terminal' ? 'not known (supplier)' : 'plenty') : fmt.num(a.available_amount);
+  const amount = a.available_amount == null ? '–' : a.available_amount >= 999999 ? (a.logistic_model === 'Terminal' ? 'not known (supplier)' : 'not tracked') : fmt.num(a.available_amount);
   return [
     ['Product code', c.product_id],
     ['Unit price', c.price.unit_price != null ? `${fmt.eur(c.price.unit_price)} / ${unitWord(c.sales_unit)}` : 'no price'],
@@ -834,6 +859,7 @@ function decisionPanel() {
     h('div', { class: `outcome tone-${out.tone}` },
       h('span', { class: 'outcome-icon', 'aria-hidden': 'true', text: out.icon }),
       h('div', {}, h('strong', { text: out.title }), h('span', { text: d?.summary || orderStateMessage() }))),
+    fixesBlock(d),
     checkGroup('Needs attention', failing),
     checkGroup('Notes', notes),
     checkGroup(`Passed checks (${passed.length})`, passed, true),
@@ -844,6 +870,31 @@ function decisionPanel() {
 
 function currentCustomerName(id) {
   return S.customers.find((c) => c.id === id)?.name || id;
+}
+
+// What the agent proposes when the order cannot be placed. Each fix was checked by the server first.
+function fixesBlock(d) {
+  const fixes = d?.outcome === 'reject' ? d.fixes || [] : [];
+  if (!fixes.length) return null;
+  const busy = S.requestPending || S.submissionPending || S.evaluationPending;
+  return h('div', { class: 'fixes', role: 'group', 'aria-label': 'Ways to place this order' },
+    h('div', { class: 'label', text: 'The agent suggests' }),
+    fixes.map((f) => h('button', { type: 'button', class: 'fix', disabled: busy, onClick: () => applyFix(f) },
+      h('strong', { text: f.title }),
+      h('span', { text: f.detail }))));
+}
+
+async function applyFix(fix) {
+  if (fix.kind === 'switch') {
+    const picks = Object.entries(fix.selections).map(([i, pid]) => [Number(i), pid]);
+    const [lastIndex, lastPid] = picks[picks.length - 1];
+    picks.slice(0, -1).forEach(([i, pid]) => { S.selections[i] = pid; rerenderItem(i); });
+    await selectCandidate(lastIndex, lastPid); // re-evaluates the whole selection
+    say(`Switched to the option that can be ordered: ${fix.detail}.`);
+  } else {
+    say(`${fix.title}: I'm checking live prices and stock again.`);
+    await runRequest(fix.override); // a new signed offer, evaluated again
+  }
 }
 
 function submitBlock(lines, out, d) {
@@ -1036,6 +1087,7 @@ function newRequest({ focus = true } = {}) {
   Object.assign(S, { offer: null, decision: null, edit: null, submitted: null, selections: {}, sort: {}, rationale: null, dirty: false, requestChanged: false, requestPending: false, evaluationPending: false, evaluationError: null, submitError: null });
   S.chat = { messages: [], understood: null, from: 0 };
   S.pendingCancel = null;
+  S.pendingReminder = null;
   S.notice = null;
   $('#results').hidden = true;
   $('#results').classList.remove('is-refreshing');
@@ -1166,7 +1218,7 @@ function historyRow(o) {
         l.delivered_quantity < l.quantity ? h('span', { class: 'short-note', text: ` (got ${fmt.num(l.delivered_quantity)})` }) : null,
         h('span', { class: 'cell-sub', text: l.product_name }))),
       o.lines.length > 3 ? h('span', { class: 'cell-sub', text: `+ ${o.lines.length - 3} more` }) : null),
-    h('td', {}, o.ordered_by, h('span', { class: 'cell-sub', text: `${CHANNEL_LABEL[o.channel] || o.channel} · ${o.site}` })),
+    h('td', {}, o.ordered_by, h('span', { class: 'cell-sub', text: [CHANNEL_LABEL[o.channel] || o.channel, o.site].filter(Boolean).join(' · ') })),
     h('td', { class: 'num', text: o.total == null ? '–' : fmt.eur(o.total) }),
     h('td', {}, status));
 }
@@ -1211,29 +1263,65 @@ async function loadPortalOrders() {
 }
 
 // ====================================================================== explore page
+// Two levels: a few groups (Fresh & chilled, Frozen, Pantry, Drinks, Non-food), then their departments.
+async function loadDepartments() {
+  try { S.departments = await api('/api/catalog/departments'); } catch { S.departments = []; }
+  if (!S.explore.group && S.departments.length) S.explore.group = S.departments[0].id; // start on a group, not an empty page
+  renderDepartments();
+}
+
+function selectExplore(group, department) {
+  S.explore.group = group;
+  S.explore.department = department;
+  S.explore.category = '';
+  renderDepartments();
+  runExplore();
+}
+
+function renderDepartments() {
+  const groups = S.departments || [];
+  const group = groups.find((g) => g.id === S.explore.group);
+  $('#explore-departments').replaceChildren(...groups.map((g) => h('button', {
+    type: 'button', class: 'dept-card', 'aria-pressed': String(g.id === S.explore.group),
+    title: `${g.name}: ${g.departments.map((d) => d.name).join(', ')}`,
+    onClick: () => selectExplore(g.id, ''),
+  },
+  h('span', { class: 'dept-name', text: g.name }),
+  h('span', { class: 'dept-meta', text: `${fmt.num(g.products)} products · ${fmt.num(g.types)} types` }),
+  h('span', { class: 'dept-meta', text: g.avg_co2 == null ? 'no carbon data' : `avg ${fmt.num(g.avg_co2, 1)} kg CO₂e/kg` }))));
+
+  // the group's departments, as a row of chips ("All" first); none for a group of one
+  const subs = group && group.departments.length > 1 ? [
+    h('button', { type: 'button', class: 'facet', 'aria-pressed': String(!S.explore.department), onClick: () => selectExplore(group.id, '') },
+      `All ${group.name.toLowerCase()}`, h('span', { class: 'count', text: fmt.num(group.products) })),
+    ...group.departments.map((d) => h('button', {
+      type: 'button', class: 'facet', 'aria-pressed': String(d.id === S.explore.department),
+      title: `${fmt.num(d.types)} product types · ${d.avg_co2 == null ? 'no carbon data' : `avg ${fmt.num(d.avg_co2, 1)} kg CO₂e/kg`}`,
+      onClick: () => selectExplore(group.id, S.explore.department === d.id ? '' : d.id),
+    }, d.name, h('span', { class: 'count', text: fmt.num(d.products) }))),
+  ] : [];
+  const row = $('#explore-subdepartments');
+  row.replaceChildren(...subs);
+  row.hidden = !subs.length;
+}
+
 async function runExplore() {
-  S.exploreLoaded = true;
-  const q = $('#explore-q').value.trim();
+  if (!S.exploreLoaded) {
+    S.exploreLoaded = true;
+    await loadDepartments();
+  }
   const body = $('#explore-body');
-  if (q.length < 2) { body.replaceChildren(h('p', { class: 'empty', text: 'Type at least two letters.' })); return; }
+  const scope = S.explore.department || S.explore.group;
+  if (!scope) { body.replaceChildren(h('p', { class: 'empty', text: 'Choose a group above.' })); return; }
   body.classList.add('is-refreshing');
   try {
-    const params = new URLSearchParams({ q, filters: [...S.explore.filters].join(','), category: S.explore.category });
-    const res = await api(`/api/catalog/search?${params}`);
-    renderFacets(res.facets);
-    renderExplore(res);
+    const params = new URLSearchParams({ category: S.explore.category, department: scope });
+    renderExplore(await api(`/api/catalog/search?${params}`));
   } catch (e) {
     body.replaceChildren(h('p', { class: 'empty', text: e.message }));
   } finally {
     body.classList.remove('is-refreshing');
   }
-}
-
-function renderFacets(facets) {
-  $('#explore-facets').replaceChildren(...facets.map((f) => h('button', {
-    type: 'button', class: 'facet', 'aria-pressed': String(f.active),
-    onClick: () => { if (S.explore.filters.has(f.key)) S.explore.filters.delete(f.key); else S.explore.filters.add(f.key); S.explore.category = ''; runExplore(); },
-  }, f.label, h('span', { class: 'count', text: fmt.num(f.count) }))));
 }
 
 function kpi(label, value, sub) {
@@ -1248,48 +1336,48 @@ function renderExplore(res) {
     .sort((a, b) => a.reliability - b.reliability).slice(0, 12);
   const carbonChart = carbonGroups.length ? barList(carbonGroups.map((g) => ({
     id: g.category,
-    label: `Product group ${g.category}`,
+    label: g.name || `Category ${g.category}`,
     sublabel: `${fmt.num(g.count)} ${plural('product', g.count)} · avg. delivery reliability ${fmt.pct(g.reliability)}`,
     value: g.co2,
     valueText: `${fmt.num(g.co2, 2)} kg CO₂e/kg`,
     selected: g.category === S.explore.category,
-    tooltip: [['Product group', g.category], ['Products here', fmt.num(g.count)], ['Avg kg CO₂e per kg', fmt.num(g.co2, 3)], ['Avg delivery reliability', fmt.pct(g.reliability)]],
+    tooltip: [['Product type', g.name || g.category], ['Products here', fmt.num(g.count)], ['Avg kg CO₂e per kg', fmt.num(g.co2, 3)], ['Avg delivery reliability', fmt.pct(g.reliability)]],
   })), {
-    ariaLabel: 'Aggregated carbon footprint by product group',
+    ariaLabel: 'Aggregated carbon footprint by product type',
     onSelect: (cat) => { S.explore.category = S.explore.category === cat ? '' : cat; runExplore(); },
-  }) : h('p', { class: 'empty', text: 'No carbon-footprint data for these product groups.' });
+  }) : h('p', { class: 'empty', text: 'No carbon-footprint data for these product types.' });
   const reliabilityChart = reliabilityGroups.length ? barList(reliabilityGroups.map((g) => ({
     id: g.category,
-    label: `Product group ${g.category}`,
+    label: g.name || `Category ${g.category}`,
     sublabel: `${fmt.num(g.count)} ${plural('product', g.count)}`,
     value: g.reliability,
     valueText: fmt.pct(g.reliability),
     selected: g.category === S.explore.category,
-    tooltip: [['Product group', g.category], ['Products here', fmt.num(g.count)], ['Avg delivery reliability', fmt.pct(g.reliability)]],
+    tooltip: [['Product type', g.name || g.category], ['Products here', fmt.num(g.count)], ['Avg delivery reliability', fmt.pct(g.reliability)]],
   })), {
-    ariaLabel: 'Aggregated delivery reliability by product group',
+    ariaLabel: 'Aggregated delivery reliability by product type',
     onSelect: (cat) => { S.explore.category = S.explore.category === cat ? '' : cat; runExplore(); },
-  }) : h('p', { class: 'empty', text: 'No delivery-reliability data for these product groups.' });
+  }) : h('p', { class: 'empty', text: 'No delivery-reliability data for these product types.' });
 
   $('#explore-body').replaceChildren(
     h('div', { class: 'kpi-row' },
-      kpi('Products in view', fmt.num(k.total), 'matches the selected search and filters'),
+      kpi('Products in view', fmt.num(k.total), S.explore.category ? 'in the selected product type' : (S.explore.department ? 'in the selected department' : 'in the selected group')),
       kpi('With carbon data', fmt.num(k.with_co2), k.total ? `${fmt.pct(k.with_co2 / k.total)} of results` : null),
       kpi('Avg carbon footprint', k.avg_co2 == null ? 'n/a' : `${fmt.num(k.avg_co2, 2)} kg CO₂e/kg`),
       kpi('With delivery data', fmt.num(k.with_reliability), k.total ? `${fmt.pct(k.with_reliability / k.total)} of results` : null),
       kpi('Avg delivery reliability', fmt.pct(k.avg_reliability), 'share of ordered quantity delivered'),
-      kpi('Product groups', fmt.num(res.groups_total), S.explore.category ? `filtered to group ${S.explore.category}` : 'aggregate view')),
+      kpi('Product types', fmt.num(res.groups_total), S.explore.category ? `filtered to ${res.groups.find((g) => g.category === S.explore.category)?.name || S.explore.category}` : 'aggregate view')),
     h('div', { class: 'explore-chart-grid' },
       h('section', { class: 'panel item-panel' },
-        h('div', { class: 'panel-head' }, h('h3', { text: 'Carbon footprint by group' }),
+        h('div', { class: 'panel-head' }, h('h3', { text: 'Carbon footprint by product type' }),
           h('span', { class: 'muted small', text: 'Average kg CO₂e per kg' })),
         carbonChart,
-        h('p', { class: 'chart-caption', text: `Highest averages among ${fmt.num(carbonGroups.length)} groups shown. Select a group to filter the metrics.` })),
+        h('p', { class: 'chart-caption', text: `Highest averages among ${fmt.num(carbonGroups.length)} product types shown. Select one to filter the metrics.` })),
       h('section', { class: 'panel item-panel' },
-        h('div', { class: 'panel-head' }, h('h3', { text: 'Delivery reliability by group' }),
+        h('div', { class: 'panel-head' }, h('h3', { text: 'Delivery reliability by product type' }),
           h('span', { class: 'muted small', text: 'Share of ordered quantity delivered' })),
         reliabilityChart,
-        h('p', { class: 'chart-caption', text: `Lowest averages among ${fmt.num(reliabilityGroups.length)} groups shown. Select a group to filter the metrics.` }))));
+        h('p', { class: 'chart-caption', text: `Lowest averages among ${fmt.num(reliabilityGroups.length)} product types shown. Select one to filter the metrics.` }))));
 }
 
 // ====================================================================== sign-in
@@ -1365,7 +1453,6 @@ async function init() {
   showPortal();
   try { S.vocab = await api('/api/vocab'); } catch { /* keep defaults */ }
   try { S.customers = await api('/api/customers'); } catch (e) { setStatus(e.message, true); }
-  $('#explore-form').addEventListener('submit', (e) => { e.preventDefault(); S.explore.category = ''; runExplore(); });
 
   renderExamples();
   initVoice();

@@ -15,7 +15,8 @@ orders are left out):
     Score = 0.50·D + 0.20·F + 0.15·R + 0.15·M          (between 0 and 1)
 
 Items not bought for more than 3·T are treated as paused (out of season, dropped from the menu) and are
-not suggested. The amount is the median of the last 8 ordinary orders; the delivery day is the last
+not suggested, nor are items already ordered for a later day (d < 0). New orders placed in the portal
+count like any other, so the suggestions follow what the customer actually orders. The amount is the median of the last 8 ordinary orders; the delivery day is the last
 delivery + T, no earlier than tomorrow, on a weekday the customer takes deliveries (or the item's own
 weekday when at least 70% of its deliveries fall on it). Every suggestion carries these numbers, so the
 ranking can be checked by hand.
@@ -26,7 +27,11 @@ import json
 import statistics
 from collections import Counter, defaultdict
 from datetime import date, timedelta
+from functools import lru_cache
 from pathlib import Path
+
+from agent import rules_parser
+from contracts import vocab
 
 WEIGHTS = {"due": 0.50, "frequency": 0.20, "regularity": 0.15, "trend": 0.15}
 RECENT_DAYS = 56
@@ -47,9 +52,23 @@ FORMULA = {
     "rules": [
         f"Only items with at least {MIN_DELIVERIES} deliveries; cancelled orders and one-off event orders are left out.",
         f"Items not bought for more than {PAUSED_AFTER}·T are paused (for example out of season) and not suggested.",
+        "Items already ordered for a later day are not suggested. New orders count as soon as they are placed.",
         "Amount = median of the last 8 ordinary orders. Delivery = last delivery + T, no earlier than tomorrow, on one of your delivery days.",
     ],
 }
+
+
+def item_phrase(item) -> str:
+    """A request item as a short phrase: its claims, then the product ("lactose-free milk")."""
+    claims = [vocab.CLAIMS[c] for c in sorted(item.constraints.required_claims) if c in vocab.CLAIMS]
+    return " ".join(claims + [item.product_query])
+
+
+@lru_cache(maxsize=4096)
+def item_key(phrase: str) -> str:
+    """One key per item however it was written: "potatoes" and "potato" are the same item."""
+    parsed = rules_parser.parse(f"10 kg {phrase} for Monday", date(2026, 11, 16))
+    return item_phrase(parsed.items[0]).lower() if len(parsed.items) == 1 else phrase.lower()
 
 
 def load_history(folder: Path) -> dict[str, list[dict]]:
@@ -100,19 +119,25 @@ def next_delivery(due: date, today: date, weekdays: set[int]) -> date:
 def score_items(orders: list[dict], today: date) -> list[dict]:
     """Every regular item with its inputs, components and score, best first (paused items included,
     marked, so the table can show why they are not suggested)."""
-    ordinary = [o for o in orders if _ordinary(o) and date.fromisoformat(o["delivery_date"]) <= today]
+    ordinary = [o for o in orders if _ordinary(o)]  # including orders placed for a later day
     if not ordinary:
         return []
     first_day = min(date.fromisoformat(o["delivery_date"]) for o in ordinary)
     span = max(RECENT_DAYS, (today - first_day).days)
-    rows = defaultdict(list)  # (phrase, unit) -> [(delivery date, quantity)]
-    for o in ordinary:
+    rows = defaultdict(list)  # (item key, unit) -> [(delivery date, quantity)]
+    phrases = {}  # (item key, unit) -> the latest way the customer wrote it
+    for o in sorted(ordinary, key=lambda o: o["delivery_date"]):
         day = date.fromisoformat(o["delivery_date"])
         for line in o["lines"]:
-            rows[(line["request"], line["unit"])].append((day, line["quantity"]))
+            if line.get("unit") not in UNIT_SHORT:
+                continue  # pieces and sales units have no amount to suggest in kg or litres
+            key = (item_key(line["request"]), line["unit"])
+            rows[key].append((day, line["quantity"]))
+            phrases[key] = line["request"]
 
     items = []
-    for (phrase, unit), seen in rows.items():
+    for key, seen in rows.items():
+        phrase, unit = phrases[key], key[1]
         days = sorted({d for d, _ in seen})
         if len(days) < MIN_DELIVERIES:
             continue
@@ -130,27 +155,28 @@ def score_items(orders: list[dict], today: date) -> list[dict]:
             "quantity": _round_amount(statistics.median(q for _, q in sorted(seen)[-8:])),
             "own_weekday": own_weekday if own_share / len(days) >= 0.7 else None,
             "paused": since > PAUSED_AFTER * interval,
+            "scheduled": since < 0,  # already ordered for a later day
         })
     if not items:
         return []
     n_max = max(i["n"] for i in items)
     for i in items:
         c = {
-            "due": min(i["since"] / i["interval"], 2) / 2,
+            "due": max(0.0, min(i["since"] / i["interval"], 2) / 2),
             "frequency": i["n"] / n_max,
             "regularity": max(0.0, 1 - i["spread"] / i["interval"]),
             "trend": min(i["rate_ratio"], 2) / 2,
         }
         i["components"] = {k: round(v, 2) for k, v in c.items()}
         i["score"] = round(sum(WEIGHTS[k] * v for k, v in c.items()), 3)
-    items.sort(key=lambda i: (i["paused"], -i["score"]))
+    items.sort(key=lambda i: (i["paused"] or i["scheduled"], -i["score"]))
     return items
 
 
 def suggest(orders: list[dict], today: date, limit: int = 4) -> list[dict]:
     weekdays = delivery_weekdays(orders)
     out = []
-    for i in [i for i in score_items(orders, today) if not i["paused"]][:limit]:
+    for i in [i for i in score_items(orders, today) if not i["paused"] and not i["scheduled"]][:limit]:
         due = date.fromisoformat(i["last"]) + timedelta(days=round(i["interval"]))
         day = next_delivery(due, today, {i["own_weekday"]} if i["own_weekday"] is not None else weekdays)
         c = i["components"]
@@ -161,6 +187,8 @@ def suggest(orders: list[dict], today: date, limit: int = 4) -> list[dict]:
             "delivery_date": day.isoformat(),
             "score": i["score"],
             "components": c,
+            "reason": (f"You order this about every {i['interval']:g} days; the last delivery was {i['since']} days ago. "
+                       f"Your usual amount is {i['quantity']:g} {UNIT_SHORT[i['unit']]}."),
             "explain": (f"Score {i['score']:.2f} = 0.50×Due {c['due']:.2f} + 0.20×Frequency {c['frequency']:.2f} "
                         f"+ 0.15×Regularity {c['regularity']:.2f} + 0.15×Trend {c['trend']:.2f}. "
                         f"About every {i['interval']:g} days; last delivery {i['since']} days ago; "

@@ -12,12 +12,27 @@ from datetime import date
 
 from agent import rules_parser
 from contracts.models import ParsedRequest
+from contracts.vocab import CLAIMS
 
 UNIT_WORDS = {"L": "litres", "KG": "kg", "PCS": "pieces", "SALES_UNIT": "units"}
 # Warnings that only restate a missing detail; the question asks for those directly.
 _ROUTINE = ("No delivery date", "No quantity", "No products", "Ignored", "The delivery date could not be read",
             "Claude parser unavailable")
 _YES = re.compile(r"^\s*(?:yes|yep|yeah|ok(?:ay)?|sure|correct|right|that'?s (?:right|fine|ok)|sounds good|kyllä|joo)\b", re.I)
+
+
+_REMOVE = re.compile(r"\b(?:remove|drop|delete|take\s+out|leave\s+out|skip|forget(?:\s+about)?|no\s+more|"
+                     r"(?:don'?t|do\s+not)\s+need|poista|jätä\s+pois)\b", re.I)
+_MORE = re.compile(r"\b(?:more|extra|another|additional|lisää)\b", re.I)
+
+
+def _words(product: str) -> list[str]:
+    """The words that name a product in a message ("whipping cream" -> whipping, cream), singular too."""
+    out = []
+    for w in product.lower().split():
+        if len(w) >= 3:
+            out += [w, w[:-1]] if w.endswith("s") and len(w) > 3 else [w]
+    return out
 
 
 def _join(words: list[str]) -> str:
@@ -45,8 +60,13 @@ def _open_points(parsed: ParsedRequest) -> tuple[list[str], list[str]]:
     elif missing:
         points.append(f"how much of each you need ({_join(missing)})")
     for it in parsed.items:
-        if it.quantity is not None and it.unit and it.assumption:
-            why = f" ({it.assumption.rstrip('.')})" if len(it.assumption) <= 90 else ""
+        if it.quantity is not None and it.unit and it.assumption.startswith("your usual amount"):
+            last = it.assumption.split("; ", 1)[1] if "; " in it.assumption else ""
+            what = " ".join([CLAIMS[c] for c in sorted(it.constraints.required_claims) if c in CLAIMS] + [it.product_query])
+            points.append(f"whether your usual {it.quantity:,.10g} {UNIT_WORDS.get(it.unit, it.unit)} of {what} is right"
+                          + (f" ({last})" if last else ""))
+        elif it.quantity is not None and it.unit and it.assumption:
+            why =f" ({it.assumption.rstrip('.')})" if len(it.assumption) <= 90 else ""
             points.append(f"whether {it.quantity:,.10g} {UNIT_WORDS.get(it.unit, it.unit)} of {it.product_query} is right{why}")
     if parsed.delivery_date_assumed:
         points.append("which day it should be delivered")
@@ -89,13 +109,22 @@ def merge_answer(previous: ParsedRequest, answer: str, today: date) -> ParsedReq
     out.substitution_allowed = out.substitution_allowed and new.substitution_allowed
     out.clarification_required = out.clarification_required or new.clarification_required
 
+    removal = _REMOVE.search(answer)
+    if removal:  # "remove the butter", "we don't need the cream any more"
+        after = answer[removal.start():].lower()
+        gone = [it for it in out.items if any(w in after for w in _words(it.product_query))]
+        out.items = [it for it in out.items if it not in gone]
+        new.items = [it for it in new.items if not any(_same_product(it.product_query, g.product_query) for g in gone)]
+    more = bool(_MORE.search(answer))
     waiting = [it for it in out.items if _needs_amount(it)]
     for item in new.items:
         same = next((it for it in out.items if _same_product(it.product_query, item.product_query)), None)
         if same is None:
             out.items.append(item)  # the buyer added another product
             continue
-        if item.quantity is not None:
+        if item.quantity is not None and more and same.quantity is not None and same.unit == item.unit:
+            same.quantity, same.assumption = same.quantity + item.quantity, ""  # "10 kg more butter"
+        elif item.quantity is not None:
             same.quantity, same.unit, same.assumption = item.quantity, item.unit, item.assumption
         same.constraints = rules_parser._merge(same.constraints, item.constraints)
     if not new.items:

@@ -1,0 +1,139 @@
+/* ---------------------------------------------------------------- valio.fi look
+   Loaded after styles.css. Follows the visual language of valio.fi: Valio's iconic blue for headings,
+   uppercase semibold headings with slight tracking, pill-shaped action-blue buttons, a warm "natural
+   white" page, soft mist-blue and light-green surfaces and very round cards.
+   Valio Sans is Valio's own typeface and is not used here: Montserrat (open source) stands in for it,
+   Playfair Display for the italic accent. Remove this file's <link> in index.html to go back. */
+
+:root {
+  /* valio.fi palette */
+  --valio-iconic-blue: #002f6d;
+  --valio-blueberry-blue: #071e4a;
+  --valio-action-blue: #204dc6;
+  --valio-action-blue-hover: #1a3fa6;
+  --valio-mist: #eaf4fd;
+  --valio-natural-white: #f7f3ed;
+  --valio-ash-gray: #dfe3e6;
+  --valio-aluminum-gray: #bac4cc;
+  --valio-light-green: #ebf1e9;
+  --valio-yellow: #f3c547;
+  --valio-lemon: #f8e699;
+  --valio-coal-black: #11181e;
+
+  /* the app's tokens, mapped onto it */
+  --Aimo-petrol: var(--valio-iconic-blue);
+  --Aimo-petrol-light: var(--valio-action-blue);
+  --Aimo-petrol-dark: var(--valio-blueberry-blue);
+  --Aimo-summer: var(--valio-yellow);
+  --Aimo-summer-light: var(--valio-lemon);
+  --Aimo-white-cold: var(--valio-mist);
+  --Aimo-grey-light: var(--valio-ash-gray);
+  --text-primary: var(--valio-coal-black);
+  --text-secondary: #3f4a55;
+  --text-muted: #616161;
+  --page: var(--valio-natural-white);
+  --border: var(--valio-ash-gray);
+  --viz-accent: var(--valio-action-blue);
+  --font: Montserrat, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-accent: "Playfair Display", Georgia, serif;
+  --radius: 16px;
+  --shadow: 0 1px 2px rgba(0, 47, 109, .06), 0 8px 24px rgba(0, 47, 109, .06);
+}
+
+body { font-family: var(--font); background: var(--page); color: var(--text-primary); letter-spacing: 0; }
+
+/* headings: uppercase, semibold, slight tracking, iconic blue */
+h1, h2, h3, h4, .section-title {
+  font-family: var(--font);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  line-height: 1.12;
+  color: var(--valio-iconic-blue);
+}
+h1 { font-size: clamp(30px, 4.2vw, 50px); letter-spacing: .02em; font-weight: 700; }
+h2 { font-size: clamp(22px, 2.6vw, 30px); }
+h3 { font-size: 18px; }
+.eyebrow { font-family: var(--font); font-size: 12px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--valio-action-blue); }
+.lead { color: var(--text-secondary); font-size: 18px; line-height: 1.6; }
+.quote, blockquote { font-family: var(--font-accent); font-style: italic; }
+
+/* header */
+.site-header { background: #fff; border-bottom: 1px solid var(--valio-ash-gray); backdrop-filter: none; }
+.brand-word { background: var(--valio-iconic-blue); letter-spacing: .02em; font-weight: 800; }
+.brand-tag { color: var(--valio-iconic-blue); border-bottom-color: var(--valio-yellow); letter-spacing: .12em; }
+.main-nav a { color: var(--valio-iconic-blue); font-weight: 600; }
+.main-nav a:hover { background: var(--valio-mist); }
+.main-nav a.is-active { background: var(--valio-iconic-blue); color: #fff; }
+
+/* hero bands: natural white with a mist-blue wash, no hard gradients */
+.hero { background: linear-gradient(180deg, var(--valio-mist) 0%, var(--valio-natural-white) 100%); }
+.hero::after { background: rgba(243, 197, 71, .30); }
+.home-intro { background: linear-gradient(160deg, var(--valio-mist) 0%, var(--valio-natural-white) 55%, var(--valio-light-green) 100%); }
+
+/* surfaces: white, very round, soft shadow, no coloured top bars */
+.panel, .kpi, .review-card, .item-panel {
+  background: #fff;
+  border: 0;
+  border-top: 0;
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+}
+.request-panel, .item-panel, .review-card, .signin-card, .signin-card-valio, .panel-note { border-top: 0; }
+.panel-note { background: var(--valio-light-green); box-shadow: none; }
+.trust-card, .filter-row { background: var(--valio-mist); border-radius: 16px; }
+.kpi .stat-value, .stat-value { color: var(--valio-iconic-blue); font-weight: 700; }
+.stat-label { text-transform: uppercase; letter-spacing: .06em; font-size: 12px; font-weight: 600; color: var(--text-muted); }
+
+/* forms */
+input[type=text], input[type=search], input[type=number], input[type=date], input[type=password], select, textarea {
+  font-family: var(--font);
+  border: 1px solid var(--valio-aluminum-gray);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: none;
+}
+input[type=text]:focus, input[type=search]:focus, input[type=number]:focus, input[type=date]:focus, input[type=password]:focus, select:focus, textarea:focus {
+  outline: 3px solid rgba(32, 77, 198, .22);
+  border-color: var(--valio-action-blue);
+}
+
+/* buttons: pill, action blue; secondary is an outline pill */
+.btn {
+  font-family: var(--font);
+  font-weight: 600;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--valio-action-blue);
+  border: 2px solid var(--valio-action-blue);
+  box-shadow: none;
+}
+.btn:hover { background: var(--valio-mist); color: var(--valio-action-blue); border-color: var(--valio-action-blue); }
+.btn-primary { background: var(--valio-action-blue); border-color: var(--valio-action-blue); color: #fff; box-shadow: none; }
+.btn-primary:hover { background: var(--valio-action-blue-hover); border-color: var(--valio-action-blue-hover); color: #fff; }
+.btn:disabled, .btn[disabled] { background: var(--valio-ash-gray); border-color: var(--valio-ash-gray); color: #6b7680; }
+.link-button, a { color: var(--valio-action-blue); }
+
+/* chips: suggestions, facets, requirements */
+.example, .facet, .req-chip {
+  font-family: var(--font);
+  font-weight: 600;
+  background: var(--valio-mist);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--valio-iconic-blue);
+}
+.example:hover, .facet:hover { background: #d7e8fa; border-color: var(--valio-action-blue); }
+.facet[aria-pressed="true"], .sort-tab.is-active { background: var(--valio-iconic-blue); border-color: var(--valio-iconic-blue); color: #fff; }
+.tag-rec { background: var(--valio-lemon); border-color: var(--valio-yellow); color: var(--valio-blueberry-blue); }
+
+/* tables */
+table { border-radius: 16px; box-shadow: none; border: 1px solid var(--valio-ash-gray); }
+th { background: var(--valio-mist); color: var(--valio-iconic-blue); text-transform: uppercase; letter-spacing: .06em; font-size: 12px; font-weight: 700; }
+
+/* chat bubbles and agent details pick up the same surfaces */
+.u-row, .op { border: 1px solid var(--valio-ash-gray); border-radius: 16px; box-shadow: none; }
+.why { background: var(--valio-lemon); border-radius: 12px; }
+
+/* footer */
+.site-footer { background: var(--valio-iconic-blue); }

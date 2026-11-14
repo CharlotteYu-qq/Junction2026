@@ -1,7 +1,8 @@
 """Client for the Valio Aimo mock APIs (price & availability).
 
 Valio's docs ask clients to query only products they have already narrowed down, and there are
-undisclosed rate limits. So: batch requests, cache answers for a few minutes, back off on 429.
+rate limits (over ~10 calls a second gets HTTP 429 and a 30-second block). So: batch requests, cache
+answers for a few minutes, pace calls, and on 429 pause every call until the block has passed.
 """
 from __future__ import annotations
 
@@ -12,6 +13,15 @@ from datetime import date
 import httpx
 
 CACHE_SECONDS = 300
+BLOCK_SECONDS = 30.0   # Valio: after a 429 the key is blocked for 30 seconds
+MAX_PER_SECOND = 8     # Valio: a few hundred calls a minute is fine, over 10 a second is not
+
+
+def _retry_after(header: str | None) -> float:
+    try:
+        return max(float(header), 1.0) if header else BLOCK_SECONDS
+    except ValueError:
+        return BLOCK_SECONDS
 
 
 class ValioAPIError(RuntimeError):
@@ -25,6 +35,9 @@ class ValioClient:
         self._cache: dict[tuple[str, str, str, str], tuple[float, dict]] = {}
         self.has_key = bool(api_key)
         self.calls = 0
+        self._gate = asyncio.Lock()
+        self._blocked_until = 0.0
+        self._last_call = 0.0
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -36,11 +49,21 @@ class ValioClient:
         except httpx.HTTPError:
             return False
 
+    async def _wait_turn(self) -> None:
+        """Respect a 429 block (shared by every caller) and keep below MAX_PER_SECOND calls."""
+        async with self._gate:
+            now = time.monotonic()
+            wait = max(self._blocked_until - now, self._last_call + 1 / MAX_PER_SECOND - now, 0)
+            if wait:
+                await asyncio.sleep(wait)
+            self._last_call = time.monotonic()
+
     async def _post(self, path: str, body: dict) -> dict:
         if not self.has_key:
             raise ValioAPIError("AIMO_API_KEY is not set: add it to .env")
         last = ""
         for attempt in range(3):
+            await self._wait_turn()
             try:
                 self.calls += 1
                 r = await self._client.post(path, json=body)
@@ -48,7 +71,12 @@ class ValioClient:
                 last = f"network error: {e}"
                 await asyncio.sleep(0.6 * (attempt + 1))
                 continue
-            if r.status_code == 429 or r.status_code >= 500:
+            if r.status_code == 429:
+                # Valio blocks the key for 30 s after a 429: pause all calls until then, then retry.
+                last = "HTTP 429 (rate limited)"
+                self._blocked_until = time.monotonic() + _retry_after(r.headers.get("Retry-After"))
+                continue
+            if r.status_code >= 500:
                 last = f"HTTP {r.status_code}"
                 await asyncio.sleep(1.5 * (attempt + 1))
                 continue

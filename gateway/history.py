@@ -10,12 +10,44 @@ from collections import Counter, defaultdict
 from datetime import date
 
 
+def from_portal(order, offer, today: date) -> dict | None:
+    """An order placed in this portal, in the history's shape. What the buyer asked for (the amount in kg or
+    litres, the item with its requirements) comes from the offer the order committed. Orders that were
+    never placed (rejected, waiting for approval) are not history."""
+    from gateway.recommend import item_phrase
+    if order.status not in ("placed", "cancelled"):
+        return None
+    items = offer.parsed.items if offer else []
+    cancelled = order.status == "cancelled"
+    lines = []
+    for line in order.lines:
+        item = items[line.item_index] if line.item_index < len(items) else None
+        asked = item is not None and item.quantity and item.unit
+        lines.append({
+            "request": item_phrase(item) if item else line.name,
+            "quantity": item.quantity if asked else line.quantity,
+            "delivered_quantity": item.quantity if asked else line.quantity,
+            "unit": item.unit if asked else line.sales_unit,
+            "product_id": line.product_id, "product_name": line.name, "sales_unit": line.sales_unit,
+            "line_total": 0.0 if cancelled else line.line_total,
+        })
+    delivery = min((line.delivery_date for line in order.lines), default=order.created_at.date())
+    status = "cancelled" if cancelled else ("delivered" if delivery < today else "confirmed")
+    return {
+        "id": order.id, "ordered_at": order.created_at.isoformat(), "delivery_date": delivery.isoformat(),
+        # within the agent's authority the order was placed automatically; otherwise a named person approved it
+        "status": status, "channel": "agent",
+        "ordered_by": f"Approved by {order.reviewer}" if order.reviewer else "Auto-approval", "site": None,
+        "note": None, "lines": lines, "total": 0.0 if cancelled else order.total, "portal": True,
+    }
+
+
 def _billed(o: dict) -> bool:
     return o.get("status") != "cancelled"
 
 
 def stats(orders: list[dict], today: date) -> dict:
-    past = [o for o in orders if date.fromisoformat(o["delivery_date"]) <= today]
+    past = sorted(orders, key=lambda o: o["delivery_date"])  # orders placed for a later day count too
     billed = [o for o in past if _billed(o)]
     totals = [o["total"] for o in billed if o.get("total") is not None]
     lines = [line for o in billed for line in o["lines"]]
@@ -50,8 +82,9 @@ def stats(orders: list[dict], today: date) -> dict:
         key=lambda r: -r["spend"])
 
     def share(key: str) -> list[dict]:
-        c = Counter(o.get(key) or "–" for o in billed)
-        return [{"label": k, "orders": n, "share": round(n / len(billed), 3)} for k, n in c.most_common()]
+        c = Counter(o[key] for o in billed if o.get(key))
+        total = sum(c.values()) or 1
+        return [{"label": k, "orders": n, "share": round(n / total, 3)} for k, n in c.most_common()]
 
     full = sum(1 for line in lines if line.get("delivered_quantity", line["quantity"]) >= line["quantity"])
     return {
@@ -76,7 +109,7 @@ def stats(orders: list[dict], today: date) -> dict:
 
 def page(orders: list[dict], q: str = "", status: str = "", offset: int = 0, limit: int = 25) -> dict:
     """Newest first. `q` matches items, product names, people, kitchens and notes."""
-    rows = list(reversed(orders))
+    rows = sorted(orders, key=lambda o: o["ordered_at"], reverse=True)
     if status == "short":
         rows = [o for o in rows if any(l.get("delivered_quantity", l["quantity"]) < l["quantity"] for l in o["lines"])]
     elif status:

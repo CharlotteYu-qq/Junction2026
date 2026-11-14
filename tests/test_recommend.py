@@ -82,6 +82,38 @@ class RecommendTests(unittest.TestCase):
         self.assertGreaterEqual(page["orders"][0]["delivery_date"], page["orders"][1]["delivery_date"])  # newest first
         self.assertEqual(hist.page(orders, status="cancelled")["total"], 1)
 
+    def test_plural_and_singular_are_one_item(self):
+        self.assertEqual(recommend.item_key("potatoes"), recommend.item_key("potato"))
+        self.assertEqual(recommend.item_key("lactose-free milk"), "lactose-free milk")
+
+    def test_an_item_already_ordered_for_a_later_day_is_not_suggested(self):
+        orders = history() + [order(TODAY + timedelta(days=2), ("lactose-free milk", 120, "L"))]
+        milk = next(i for i in recommend.score_items(orders, TODAY) if i["item"] == "lactose-free milk")
+        self.assertTrue(milk["scheduled"])
+        self.assertEqual(milk["components"]["due"], 0.0)
+        self.assertFalse(any(s["item"] == "lactose-free milk" for s in recommend.suggest(orders, TODAY)))
+
+    def test_a_portal_order_joins_the_history(self):
+        from types import SimpleNamespace as NS
+        from datetime import datetime
+        from gateway import history as hist
+        item = NS(product_query="milk", quantity=130.0, unit="L", constraints=NS(required_claims=["FREE_FROM_LACTOSE"]))
+        line = NS(item_index=0, product_id="P1", name="Valio milk 1 l lactose free", quantity=130.0, sales_unit="ST",
+                  line_total=182.0, delivery_date=TODAY + timedelta(days=2))
+        placed = NS(id="O-0009", offer_id="OF-1", status="placed", lines=[line], total=182.0, reviewer=None,
+                    created_at=datetime(2026, 11, 14, 10, 0))
+        row = hist.from_portal(placed, NS(parsed=NS(items=[item])), TODAY)
+        self.assertEqual(row["status"], "confirmed")
+        self.assertEqual(row["ordered_by"], "Auto-approval")
+        approved = hist.from_portal(NS(**{**placed.__dict__, "reviewer": "Anna Virtanen"}), NS(parsed=NS(items=[item])), TODAY)
+        self.assertEqual(approved["ordered_by"], "Approved by Anna Virtanen")
+        self.assertEqual((row["lines"][0]["request"], row["lines"][0]["quantity"], row["lines"][0]["unit"]), ("lactose-free milk", 130.0, "L"))
+        self.assertIsNone(hist.from_portal(NS(**{**placed.__dict__, "status": "rejected"}), None, TODAY))
+        # it counts at once: milk is no longer suggested, and the order is in the list
+        orders = history() + [row]
+        self.assertFalse(any(s["item"] == "lactose-free milk" for s in recommend.suggest(orders, TODAY)))
+        self.assertEqual(hist.page(orders, limit=1)["orders"][0]["id"], "O-0009")
+
     def test_no_history_no_suggestions(self):
         self.assertEqual(recommend.suggest([], TODAY), [])
         with tempfile.TemporaryDirectory() as tmp:
