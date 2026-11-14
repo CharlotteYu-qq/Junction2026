@@ -1,0 +1,61 @@
+# Every update of main is tested and, if the tests pass, deployed to the Verda server.
+# Also runs from the Actions tab: "Deploy to Verda" -> Run workflow. See deploy/README.md (Auto-deploy).
+name: Deploy to Verda
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; a newer push waits for the running one instead of cancelling it halfway.
+concurrency:
+  group: deploy-verda
+  cancel-in-progress: false
+
+env:
+  HOST: 135.181.63.188
+  # The server's SSH host key (public). Pinned so the deploy only ever talks to our server.
+  HOST_KEY: "135.181.63.188 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC55Y0mwU9NwrfyOk9ryDAt4sLNoVmKpgljlmXEwf8s0"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+      - name: JavaScript syntax
+        run: for f in ui/*.js; do node --check "$f"; done
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Deploy
+        env:
+          VERDA_SSH_KEY: ${{ secrets.VERDA_SSH_KEY }}
+        run: |
+          if [ -z "$VERDA_SSH_KEY" ]; then
+            echo "::warning::Not deployed: the VERDA_SSH_KEY secret is missing (see deploy/README.md, Auto-deploy)."
+            exit 0
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VERDA_SSH_KEY" > ~/.ssh/id_ed25519_verda
+          chmod 600 ~/.ssh/id_ed25519_verda
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          # The server keeps its own .env (API keys, password); deploy.sh only needs the file to exist.
+          touch .env
+          bash deploy/deploy.sh "$HOST" ~/.ssh/id_ed25519_verda
