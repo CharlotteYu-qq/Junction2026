@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agent import rules_parser
-from agent.service import claude_available, parse_request
+from agent.service import claude_available, parse_conversation, parse_request
 from contracts import vocab
 from contracts.models import Customer, Offer, Order, ParsedRequest
 from gateway.catalog import load_catalog
@@ -333,12 +333,21 @@ async def create_request(body: RequestIn, who: Principal = Depends(buyer)):
         parsed, parse_ms = await parse_request(
             text, _today(), api_key=settings.anthropic_api_key, mode=settings.parser, model=settings.claude_model
         )
-        S.audit.append(
-            "agent", "request.parsed", customer.id,
-            "Understood: " + ("; ".join(describe_item(i) for i in parsed.items) or "no products")
-            + f" · delivery {parsed.delivery_date:%a %d %b}" + (" (assumed)" if parsed.delivery_date_assumed else ""),
-            {"parser": parsed.parser, "warnings": parsed.warnings},
-        )
+        _audit_understood(customer, parsed)
+    return await _offer_response(customer, parsed, text, parse_ms)
+
+
+def _audit_understood(customer: Customer, parsed: ParsedRequest) -> None:
+    S.audit.append(
+        "agent", "request.parsed", customer.id,
+        "Understood: " + ("; ".join(describe_item(i) for i in parsed.items) or "no products")
+        + f" · delivery {parsed.delivery_date:%a %d %b}" + (" (assumed)" if parsed.delivery_date_assumed else ""),
+        {"parser": parsed.parser, "warnings": parsed.warnings},
+    )
+
+
+async def _offer_response(customer: Customer, parsed: ParsedRequest, text: str, parse_ms: int) -> dict:
+    """Catalog search -> Valio price & availability -> signed offer, plus the policy preview."""
     offer = await build_offer(
         customer=customer, parsed=parsed, request_text=text, parse_ms=parse_ms, catalog=S.catalog,
         valio=S.valio, signer=S.signer, ttl_minutes=settings.offer_ttl_minutes,
@@ -354,6 +363,43 @@ async def create_request(body: RequestIn, who: Principal = Depends(buyer)):
     )
     decision, _ = evaluate(customer, offer, {}, datetime.now(TZ), verify_offer(offer, S.signer))
     return {"offer": offer.model_dump(mode="json"), "decision": decision.model_dump(mode="json"), "customer": _customer_out(customer)}
+
+
+class ChatTurn(BaseModel):
+    role: Literal["buyer", "agent"]
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class ChatIn(BaseModel):
+    messages: list[ChatTurn] = Field(min_length=1, max_length=30)  # the conversation so far, oldest first
+    understood: Optional[ParsedRequest] = None  # what the agent understood after the previous turn
+    skip_questions: bool = False  # the buyer wants to see options now, with what is known so far
+
+
+@app.post("/api/chat", tags=["ordering"])
+async def chat(body: ChatIn, who: Principal = Depends(buyer)):
+    """Talk to the ordering agent. While a quantity, unit or delivery date is missing (or a condition is
+    unclear) it answers with a question; once the request is complete it returns a signed offer."""
+    if body.messages[-1].role != "buyer":
+        raise HTTPException(400, "The last message must be the buyer's")
+    customer = _customer(who.customer_id)
+    turns = [(m.role, m.text.strip()) for m in body.messages]
+    request_text = " · ".join(text for role, text in turns if role == "buyer")
+    if body.skip_questions and body.understood is not None:
+        parsed, parse_ms = body.understood, 0  # nothing new was said: use what the agent already understood
+    else:
+        S.audit.append(who.actor, "request.received", customer.id, f"{customer.name} said: “{_clip(turns[-1][1], 180)}”")
+        parsed, question, parse_ms = await parse_conversation(
+            turns, body.understood, _today(), api_key=settings.anthropic_api_key, mode=settings.parser,
+            model=settings.claude_model,
+        )
+        if question and not body.skip_questions:
+            S.audit.append("agent", "agent.asked", customer.id, f"Agent asked {customer.name}: “{_clip(question, 180)}”",
+                           {"parser": parsed.parser})
+            return {"kind": "question", "question": question, "understood": parsed.model_dump(mode="json")}
+    _need_catalog()
+    _audit_understood(customer, parsed)
+    return {"kind": "offer", **await _offer_response(customer, parsed, request_text, parse_ms)}
 
 
 @app.get("/api/offers/{offer_id}", tags=["ordering"])

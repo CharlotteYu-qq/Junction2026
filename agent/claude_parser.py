@@ -54,8 +54,13 @@ SCHEMA = {
         "substitution_allowed": {"type": "boolean"},
         "clarification_required": {"type": "boolean"},
         "notes": {"type": "string"},
+        "follow_up_question": {
+            "type": "string",
+            "description": "One short question to the buyer for everything that is still missing, or empty",
+        },
     },
-    "required": ["items", "delivery_date", "delivery_date_stated", "budget_eur", "substitution_allowed", "clarification_required", "notes"],
+    "required": ["items", "delivery_date", "delivery_date_stated", "budget_eur", "substitution_allowed",
+                 "clarification_required", "notes", "follow_up_question"],
     "additionalProperties": False,
 }
 
@@ -88,11 +93,32 @@ Rules:
 - clarification_required: true for conflicting/invalid budgets, non-EUR budgets, unknown currency,
   conflicting substitution instructions, unsupported restrictions or contradictory requirements.
   Explain what needs clarification in notes. Do not silently drop these conditions.
-- Ignore sentences that are not about products (e.g. "find the best option")."""
+- Ignore sentences that are not about products (e.g. "find the best option").
+- The input may be a conversation between the buyer and you, the ordering agent. Combine everything
+  the buyer said: later messages complete or correct earlier ones ("200 litres" answers "how much
+  milk?"). If the buyer confirmed an amount you estimated, it is no longer estimated.
+- follow_up_question: if any item has no quantity or unit, an amount is only estimated, no delivery
+  date was stated, or something needs clarification, write one short, friendly question in the
+  buyer's language that asks for every missing detail at once, including the delivery day when none
+  was stated (propose your estimate if you made one; don't mention defaults you assumed). Otherwise
+  an empty string."""
 
 
 async def parse(text: str, today: date, model: str) -> ParsedRequest:
+    """One request in plain words -> structured order lines."""
+    return (await parse_dialogue([("buyer", text)], today, model))[0]
+
+
+async def parse_dialogue(turns: list[tuple[str, str]], today: date, model: str) -> tuple[ParsedRequest, str]:
+    """A conversation [("buyer" | "agent", text), ...] -> (order lines so far, suggested follow-up question)."""
     import anthropic  # optional dependency
+
+    buyer_text = "\n".join(text for role, text in turns if role == "buyer")
+    if len(turns) == 1:
+        content = buyer_text
+    else:
+        content = "Conversation so far:\n" + "\n".join(
+            f"{'Buyer' if role == 'buyer' else 'Agent'}: {text}" for role, text in turns)
 
     client = anthropic.AsyncAnthropic()
     fallback = (
@@ -105,19 +131,20 @@ async def parse(text: str, today: date, model: str) -> ParsedRequest:
         **fallback,
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
         system=SYSTEM.format(today=today.isoformat(), weekday=today.strftime("%A")),
-        messages=[{"role": "user", "content": text}],
+        messages=[{"role": "user", "content": content}],
     )
     if response.stop_reason == "refusal":
         raise RuntimeError("the model declined this request")
     if response.stop_reason == "max_tokens":
         raise RuntimeError("the model's answer was cut off")
     raw = next(b.text for b in response.content if b.type == "text")
-    parsed = to_parsed(json.loads(raw), today)
+    data = json.loads(raw)
+    parsed = to_parsed(data, today)
     # The deterministic guard independently preserves explicit controls even if the
     # language model overlooks them. More restrictive results always take precedence.
     from agent.rules_parser import extract_controls, extract_date, normalise_numbers
 
-    _, controls_text = extract_date(normalise_numbers(text), today)
+    _, controls_text = extract_date(normalise_numbers(buyer_text), today)
     _, budget, substitutions, clarification, notes = extract_controls(controls_text)
     if budget is not None:
         if parsed.budget_eur is not None and parsed.budget_eur != budget:
@@ -127,7 +154,7 @@ async def parse(text: str, today: date, model: str) -> ParsedRequest:
     parsed.substitution_allowed = parsed.substitution_allowed and substitutions
     parsed.clarification_required = parsed.clarification_required or clarification
     parsed.warnings.extend(notes)
-    return parsed
+    return parsed, str(data.get("follow_up_question") or "")
 
 
 def to_parsed(data: dict, today: date) -> ParsedRequest:

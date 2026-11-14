@@ -392,6 +392,25 @@ def parse(text: str, today: date) -> ParsedRequest:
     )
 
 
+def stated_amounts(text: str, today: date) -> list[tuple[float, str]]:
+    """Amounts with an explicit unit, in order: "200 litres and 5 kg" -> [(200.0, "L"), (5.0, "KG")].
+
+    For follow-up answers that name no product. Dates and money are removed first.
+    """
+    work = normalise_numbers(text)
+    _, work = extract_date(work, today)
+    work = extract_controls(work)[0]
+    out: list[tuple[float, str]] = []
+    for m in _QTY_RE.finditer(work):
+        if not m.group("unit"):
+            continue
+        unit, factor = _unit_of(m.group("unit"))
+        quantity = round(float(m.group("qty")) * factor, 4)
+        if math.isfinite(quantity) and quantity > 0:
+            out.append((quantity, unit))
+    return out
+
+
 def _merge(a: Constraints, b: Constraints) -> Constraints:
     return Constraints(
         required_claims=list(dict.fromkeys(a.required_claims + b.required_claims)),
