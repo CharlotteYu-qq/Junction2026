@@ -14,7 +14,8 @@ Plain HTML/CSS/JS modules, with no build step. FastAPI serves them at `/`.
 
 | File | What it does |
 |---|---|
-| `index.html` | The pages Home (introduction, with sign-in when signed out), Order, My orders and Explore, and the approval dialog for orders outside the agent's authority. The page is in the address (`#order`, ...), so a refresh stays on it; no hash means Home |
+| `index.html` | The pages Home (introduction, with sign-in when signed out), Order, My orders and Explore, and the approval dialog for orders outside the agent's authority. The page is in the address (`#order`, ...), so a refresh stays on it; no hash means Home; the logo leads there. Home also opens the user guide video (YouTube, loaded only when opened) |
+| `media/` | The introduction video on Home (`introduction.mp4`, fetched only when played) and its poster frame |
 | `app.js` | Page logic, API calls, the conversation with the agent and sign-in behaviour |
 | `charts.js` | Ranked bar charts (selected option emphasised, tooltips, keyboard support), status chips |
 | `dom.js` | Safe DOM builder (text only through `textContent`) and formatting helpers |

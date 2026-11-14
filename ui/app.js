@@ -1449,6 +1449,24 @@ function initSignIn() {
   });
 }
 
+// ====================================================================== user guide (home page)
+// The YouTube player is only loaded when the guide is opened (nothing from YouTube on a normal page load)
+// and is unloaded on close, which also stops the video.
+const GUIDE_URL = 'https://www.youtube-nocookie.com/embed/kfU8dfD2V04?autoplay=1&rel=0';
+
+function initGuide() {
+  const dialog = $('#guide-dialog');
+  const player = $('#guide-player');
+  $('#guide-open').addEventListener('click', () => {
+    $('#intro-video')?.pause();
+    player.src = GUIDE_URL;
+    dialog.showModal();
+  });
+  $('#guide-close').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.close(); }); // a click outside the video
+  dialog.addEventListener('close', () => { player.src = 'about:blank'; });
+}
+
 // ====================================================================== boot
 function showPortal() {
   const s = S.session;
@@ -1468,6 +1486,7 @@ function showPortal() {
 
 async function init() {
   initSignIn();
+  initGuide(); // the home page is also shown signed out
   try { S.session = await api('/api/session'); } catch { S.session = { signed_in: false }; }
   if (!S.session.signed_in) { showSignIn(); return; }
   showPortal();
