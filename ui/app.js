@@ -3,6 +3,7 @@ import { barList, hideTip, statusChip, toneChip } from './charts.js';
 
 // ====================================================================== state & api
 const S = {
+  session: null, // { signed_in, role: 'buyer' | 'valio', name, customer_id, password_required, customers }
   vocab: { claims: {}, allergens: {}, labels: {}, sales_units: {}, requirement_options: [] },
   customers: [],
   offer: null,
@@ -35,6 +36,9 @@ async function api(path, { method = 'GET', body } = {}) {
   });
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }
+  if (res.status === 401 && S.session?.signed_in && !path.startsWith('/api/session')) {
+    showSignIn('Your session ended. Sign in again.'); // expired or signed out in another tab
+  }
   if (!res.ok) {
     const d = data?.detail;
     throw new Error(typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => x.msg).join('; ') : `HTTP ${res.status}`);
@@ -86,11 +90,19 @@ function checkItem(c) {
 }
 
 // ====================================================================== status & navigation
-const PAGES = ['order', 'review', 'customers', 'audit', 'explore'];
-const loaders = { review: loadReview, customers: loadCustomersPage, audit: () => loadAudit(), explore: () => S.exploreLoaded || runExplore() };
+const PAGES = ['order', 'orders', 'review', 'customers', 'audit', 'explore'];
+// The buyer portal and the Valio Aimo admin see different pages; the server checks the same roles.
+const ROLE_PAGES = { buyer: ['order', 'orders', 'explore'], valio: ['review', 'customers', 'audit', 'explore'] };
+const loaders = {
+  orders: loadMyOrders, review: loadReview, customers: loadCustomersPage, audit: () => loadAudit(),
+  explore: () => S.exploreLoaded || runExplore(),
+};
 
 function route() {
-  const page = PAGES.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'order';
+  if (!S.session?.signed_in) return;
+  const allowed = ROLE_PAGES[S.session.role];
+  const page = allowed.includes(location.hash.slice(1)) ? location.hash.slice(1) : allowed[0];
+  $('#page-signin').hidden = true;
   for (const p of PAGES) $(`#page-${p}`).hidden = p !== page;
   document.querySelectorAll('.main-nav a').forEach((a) => {
     a.classList.toggle('is-active', a.dataset.page === page);
@@ -118,6 +130,7 @@ async function loadHealth() {
 }
 
 async function refreshReviewCount() {
+  if (S.session?.role !== 'valio') return;
   try {
     const pending = await api('/api/orders?status=pending_approval');
     const badge = $('#nav-review-count');
@@ -127,13 +140,15 @@ async function refreshReviewCount() {
 }
 
 // ====================================================================== order page
+// Each buyer sees its own demo scenarios first, then a couple that work for anyone.
 const EXAMPLES = [
-  { label: 'Hotel · 1,000 L lactose-free milk', customer: 'C-1001',
+  { label: '1,000 L lactose-free milk', customer: 'C-1001',
     text: 'I need 1,000 litres of lactose-free milk by Monday. Find an option that meets our requirements based on price and availability.' },
-  { label: 'Hotel · cream & butter', customer: 'C-1001', text: '50 l lactose-free whipping cream and 20 kg Finnish butter for Monday' },
-  { label: 'School · nut-free muesli', customer: 'C-1002', text: '15 kg muesli for Tuesday, everything must be nut-free' },
-  { label: 'New customer · first order', customer: 'C-2001', text: '30 kg potatoes and 10 kg tomatoes for Tuesday' },
+  { label: 'Cream & butter', customer: 'C-1001', text: '50 l lactose-free whipping cream and 20 kg Finnish butter for Monday' },
   { label: 'Suomeksi', customer: 'C-1001', text: 'Tarvitsen 200 litraa laktoositonta maitoa maanantaiksi' },
+  { label: 'Nut-free muesli', customer: 'C-1002', text: '15 kg muesli for Tuesday, everything must be nut-free' },
+  { label: 'Potatoes & tomatoes', customer: 'C-2001', generic: true, text: '30 kg potatoes and 10 kg tomatoes for Tuesday' },
+  { label: 'Lactose-free milk', generic: true, text: '200 litres of lactose-free milk by Friday' },
 ];
 
 function setStatus(text, bad = false) {
@@ -161,7 +176,6 @@ function updateOrderControls() {
   run.disabled = S.requestPending || S.submissionPending;
   run.classList.toggle('is-busy', S.requestPending);
   $('#request-text').disabled = S.submissionPending;
-  $('#customer').disabled = S.submissionPending;
   $('#reset-demo').disabled = S.requestPending || S.submissionPending;
   const rationale = $('#rationale');
   if (rationale) rationale.disabled = S.submissionPending;
@@ -188,15 +202,13 @@ function markDirty(requestChanged = false) {
   updateOrderControls();
 }
 
+// The buyer orders as the customer it signed in as; there is no way to pick another one.
 function currentCustomer() {
-  return S.customers.find((c) => c.id === $('#customer').value) || S.customers[0];
+  return S.customers.find((c) => c.id === S.session?.customer_id);
 }
 
-function renderCustomerSelect(keep) {
-  const sel = $('#customer');
-  const value = keep || sel.value || storage.get('aimo.customer', 'C-1001');
-  sel.replaceChildren(...S.customers.map((c) => h('option', { value: c.id, text: c.name })));
-  sel.value = S.customers.some((c) => c.id === value) ? value : S.customers[0]?.id;
+function renderCustomer() {
+  $('#customer-name').textContent = currentCustomer()?.name || S.session?.name || '';
   renderTrustCard();
 }
 
@@ -209,15 +221,14 @@ function renderTrustCard() {
 }
 
 function renderExamples() {
+  const mine = EXAMPLES.filter((ex) => ex.customer === S.session.customer_id);
+  const shown = [...mine, ...EXAMPLES.filter((ex) => ex.generic && !mine.includes(ex))].slice(0, 4);
   $('#examples').replaceChildren(
     h('span', { class: 'muted small', text: 'Try:' }),
-    ...EXAMPLES.map((ex) => h('button', {
+    ...shown.map((ex) => h('button', {
       type: 'button', class: 'example', text: ex.label,
       onClick: () => {
         $('#request-text').value = ex.text;
-        $('#customer').value = ex.customer;
-        storage.set('aimo.customer', ex.customer);
-        renderTrustCard();
         markDirty(true);
         runRequest();
       },
@@ -228,7 +239,7 @@ async function runRequest(override = null) {
   if (S.requestPending || S.submissionPending) return;
   const text = $('#request-text').value.trim();
   if (!text) { setStatus('Write what you need first.', true); $('#request-text').focus(); return; }
-  const customerId = $('#customer').value;
+  const customerId = S.session.customer_id;
   const version = ++S.requestVersion;
   const editVersion = S.editVersion;
   S.requestPending = true;
@@ -244,7 +255,7 @@ async function runRequest(override = null) {
   try {
     const res = await api('/api/requests', { method: 'POST', body: { customer_id: customerId, text, override } });
     if (version !== S.requestVersion) return;
-    if (editVersion !== S.editVersion || text !== $('#request-text').value.trim() || customerId !== $('#customer').value) {
+    if (editVersion !== S.editVersion || text !== $('#request-text').value.trim()) {
       setStatus('The request changed while it was being checked. Find a new option.', true);
       return;
     }
@@ -646,7 +657,7 @@ function submittedBlock() {
   const o = S.submitted;
   const map = {
     placed: ['good', '✓', `Order ${o.id} placed`, 'This order was within the customer’s authority, so the agent placed it without a person. (Simulated: the mock backend has no order endpoint.)'],
-    pending_approval: ['warning', '⚑', `Order ${o.id} is waiting for approval`, 'A person will see it in the review queue, together with the reasons and the agent’s rationale.'],
+    pending_approval: ['warning', '⚑', `Order ${o.id} is waiting for approval`, 'Valio Aimo staff will see it in their review queue, together with the reasons and the agent’s rationale. Follow it under My orders.'],
     rejected: ['critical', '✕', `Order ${o.id} was not placed`, o.decision.summary],
   };
   const [tone, icon, title, text] = map[o.status];
@@ -654,8 +665,7 @@ function submittedBlock() {
     h('strong', {}, h('span', { 'aria-hidden': 'true', text: `${icon} ` }), title),
     h('p', { text }),
     h('div', { class: 'result-actions' },
-      o.status === 'pending_approval' ? h('a', { class: 'btn btn-small btn-primary', href: '#review', text: 'Open review queue' }) : null,
-      h('a', { class: 'btn btn-small', href: '#audit', text: 'See audit trail', onClick: () => { S.auditSubject = o.id; } }),
+      h('a', { class: `btn btn-small${o.status === 'pending_approval' ? ' btn-primary' : ''}`, href: '#orders', text: 'See my orders' }),
       h('button', { class: 'btn btn-small', type: 'button', text: 'New request', onClick: newRequest })));
 }
 
@@ -678,7 +688,6 @@ async function submitOrder(rationale) {
   updateOrderControls();
   try {
     S.submitted = await api('/api/orders', { method: 'POST', body: { offer_id: offerId, selections, rationale } });
-    refreshReviewCount();
   } catch (e) {
     S.submitError = e.message;
     setStatus(e.message, true);
@@ -700,7 +709,7 @@ function newRequest() {
   $('#results').hidden = true;
   $('#results').replaceChildren();
   $('#request-text').value = '';
-  renderCustomerSelect();
+  renderCustomer();
   setStatus('');
   updateOrderControls();
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -721,7 +730,6 @@ function linesTable(lines) {
 }
 
 async function loadReview() {
-  $('#reviewer').value = $('#reviewer').value || storage.get('aimo.reviewer', '');
   try {
     const [pending, all] = await Promise.all([api('/api/orders?status=pending_approval'), api('/api/orders')]);
     $('#review-list').replaceChildren(...(pending.length ? pending.map(reviewCard)
@@ -775,13 +783,10 @@ function reviewCard(o) {
 
 async function decide(order, decision, comment, verifyCustomer) {
   if (S.reviewPending.has(order.id)) return;
-  const reviewer = $('#reviewer').value.trim();
-  if (!reviewer) { $('#reviewer').focus(); $('#reviewer').placeholder = 'Enter your name first'; return; }
   if (decision === 'approve' && ((order.offer_valid_until && new Date(order.offer_valid_until) <= new Date()) || order.decision.checks.some((ch) => !ch.passed && ch.severity === 'block'))) {
     await loadReview();
     return;
   }
-  storage.set('aimo.reviewer', reviewer);
   S.reviewPending.add(order.id);
   const card = document.querySelector(`.review-card[data-order-id="${CSS.escape(order.id)}"]`);
   const controls = [...(card?.querySelectorAll('button, input') || [])];
@@ -791,8 +796,8 @@ async function decide(order, decision, comment, verifyCustomer) {
   const error = card?.querySelector('.review-error');
   if (error) error.hidden = true;
   try {
-    await api(`/api/orders/${order.id}/decision`, { method: 'POST', body: { decision, reviewer, comment, verify_customer: Boolean(verifyCustomer) } });
-    try { S.customers = await api('/api/customers'); renderCustomerSelect(); } catch { /* Decision was saved; still refresh the queue. */ }
+    await api(`/api/orders/${order.id}/decision`, { method: 'POST', body: { decision, comment, verify_customer: Boolean(verifyCustomer) } });
+    try { S.customers = await api('/api/customers'); } catch { /* Decision was saved; still refresh the queue. */ }
     await loadReview();
   } catch (e) {
     if (error) { error.textContent = e.message; error.hidden = false; }
@@ -802,6 +807,40 @@ async function decide(order, decision, comment, verifyCustomer) {
     controls.forEach((el, i) => { el.disabled = disabledBefore[i]; });
     card?.removeAttribute('aria-busy');
   }
+}
+
+// ====================================================================== my orders (buyer portal)
+function orderStatusChip(status) {
+  if (status === 'placed') return toneChip('good', '✓', 'Placed');
+  if (status === 'pending_approval') return toneChip('warning', '⚑', 'Waiting for Valio Aimo');
+  return toneChip('critical', '✕', 'Not placed');
+}
+
+function decidedBy(o) {
+  if (o.reviewer) return `${o.reviewer} at Valio Aimo${o.review_comment ? `: “${o.review_comment}”` : ''}`;
+  if (o.status === 'pending_approval') return 'In the Valio Aimo review queue';
+  if (o.status === 'placed') return 'Placed automatically (within your limit)';
+  return o.decision.summary;
+}
+
+async function loadMyOrders() {
+  const host = $('#my-orders');
+  let orders;
+  try { orders = await api('/api/orders'); } catch (e) { host.replaceChildren(h('p', { class: 'empty', text: e.message })); return; }
+  if (!orders.length) {
+    host.replaceChildren(h('p', { class: 'empty', text: 'No orders yet. Describe what you need on the Order page.' }));
+    return;
+  }
+  host.replaceChildren(h('div', { class: 'table-wrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['Order', 'Status', 'What', 'Decided by', 'Total'].map((t, k) => h('th', { class: k === 4 ? 'num' : null, text: t })))),
+    h('tbody', {}, orders.map((o) => h('tr', {},
+      h('td', {}, o.id, h('span', { class: 'cell-sub', text: fmt.dateTime(o.created_at) })),
+      h('td', {}, orderStatusChip(o.status)),
+      h('td', {}, o.lines.length
+        ? o.lines.map((l) => h('span', { class: 'cell-line', text: `${fmt.num(l.quantity, 2)} ${unitLabel(l.sales_unit, l.quantity)} · ${l.name}` }))
+        : o.request_text || '–'),
+      h('td', { text: decidedBy(o) }),
+      h('td', { class: 'num', text: fmt.eur(o.total) })))))));
 }
 
 // ====================================================================== customers page
@@ -816,7 +855,6 @@ function validYTunnus(v) {
 
 async function loadCustomersPage() {
   try { S.customers = await api('/api/customers'); } catch (e) { $('#customer-table').replaceChildren(h('p', { class: 'empty', text: e.message })); return; }
-  renderCustomerSelect();
   $('#customer-table').replaceChildren(h('div', { class: 'table-wrap' }, h('table', {},
     h('thead', {}, h('tr', {}, ['Customer', 'Business ID', 'Trust', 'Orders', 'Avg order', 'Auto-approve up to', 'Hard rules', ''].map((t, k) =>
       h('th', { class: [3, 4, 5].includes(k) ? 'num' : null, text: t })))),
@@ -834,11 +872,8 @@ async function loadCustomersPage() {
 }
 
 async function verifyCustomer(c) {
-  const reviewer = storage.get('aimo.reviewer', '') || prompt('Your name (saved to the audit trail):') || '';
-  if (!reviewer.trim()) return;
-  storage.set('aimo.reviewer', reviewer.trim());
   try {
-    await api(`/api/customers/${c.id}/verify`, { method: 'POST', body: { reviewer: reviewer.trim() } });
+    await api(`/api/customers/${c.id}/verify`, { method: 'POST' }); // recorded as the signed-in staff member
     loadCustomersPage();
   } catch (e) { alert(e.message); }
 }
@@ -872,7 +907,7 @@ function initRegisterForm() {
 // ====================================================================== audit page
 function actorChip(actor) {
   const [kind, who] = actor.split(':');
-  const label = { customer: `Customer ${who || ''}`, agent: 'Agent', policy: 'Policy', human: `Person · ${who || ''}`, system: 'System' }[kind] || actor;
+  const label = { customer: `Customer ${who || ''}`, agent: 'Agent', policy: 'Policy', human: `Valio Aimo · ${who || ''}`, system: 'System' }[kind] || actor;
   const cls = { agent: 'actor-agent', human: 'actor-person', policy: 'actor-policy' }[kind] || '';
   return h('span', { class: `actor ${cls}`, text: label.trim() });
 }
@@ -997,35 +1032,123 @@ async function quote(p, cell) {
   }
 }
 
+// ====================================================================== sign-in
+function renderSignIn(message = '') {
+  const s = S.session || {};
+  const customers = s.customers || [];
+  const sel = $('#signin-customer');
+  const keep = sel.value || storage.get('aimo.customer', 'C-1001');
+  sel.replaceChildren(...customers.map((c) => h('option', { value: c.id, text: c.name })));
+  if (customers.some((c) => c.id === keep)) sel.value = keep;
+  $('#signin-name').value = $('#signin-name').value || storage.get('aimo.reviewer', '');
+  document.querySelectorAll('.signin-password').forEach((el) => { el.hidden = s.password_required === false; });
+  const note = message || (s.password_required === false ? 'Local development: no passwords are set on this server, so signing in needs none.' : '');
+  $('#signin-status').textContent = note;
+  $('#signin-status').hidden = !note;
+}
+
+function showSignIn(message = '') {
+  S.session = { ...(S.session || {}), signed_in: false, role: null };
+  for (const p of PAGES) $(`#page-${p}`).hidden = true;
+  $('.main-nav').hidden = true;
+  $('#session-box').hidden = true;
+  $('#reset-demo').hidden = true;
+  $('#page-signin').hidden = false;
+  hideTip();
+  renderSignIn(message);
+  api('/api/session').then((s) => { S.session = s; renderSignIn(message); }).catch(() => { /* keep the form */ });
+}
+
+async function signIn(form, body) {
+  const error = form.querySelector('.signin-error');
+  const button = form.querySelector('button[type=submit]');
+  error.hidden = true;
+  button.disabled = true;
+  try {
+    await api('/api/session/login', { method: 'POST', body });
+    history.replaceState(null, '', location.pathname); // start on the portal's first page
+    location.reload();
+  } catch (e) {
+    error.textContent = e.message;
+    error.hidden = false;
+    button.disabled = false;
+  }
+}
+
+function initSignIn() {
+  $('#signin-buyer').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const customer = $('#signin-customer').value;
+    storage.set('aimo.customer', customer);
+    signIn(e.target, { role: 'buyer', customer_id: customer, password: $('#signin-buyer-password').value });
+  });
+  $('#signin-valio').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = $('#signin-name').value.trim();
+    if (!name) {
+      const error = e.target.querySelector('.signin-error');
+      error.textContent = 'Enter your name: it is recorded with your decisions.';
+      error.hidden = false;
+      $('#signin-name').focus();
+      return;
+    }
+    storage.set('aimo.reviewer', name);
+    signIn(e.target, { role: 'valio', name, password: $('#signin-valio-password').value });
+  });
+  $('#sign-out').addEventListener('click', async () => {
+    try { await api('/api/session/logout', { method: 'POST' }); } catch { /* reload either way */ }
+    history.replaceState(null, '', location.pathname);
+    location.reload();
+  });
+}
+
 // ====================================================================== boot
+function showPortal() {
+  const s = S.session;
+  document.body.dataset.role = s.role;
+  $('#session-who').replaceChildren(h('strong', { text: s.name }),
+    h('span', { class: 'muted', text: s.role === 'buyer' ? ' · buyer portal' : ' · Valio Aimo admin' }));
+  $('#session-box').hidden = false;
+  document.querySelectorAll('.main-nav a').forEach((a) => { a.hidden = !a.dataset.roles.split(' ').includes(s.role); });
+  $('.main-nav').hidden = false;
+  $('#reset-demo').hidden = s.role !== 'valio';
+  $('#reviewer-note').textContent = s.role === 'valio' ? `Your decisions are recorded as ${s.name} (Valio Aimo).` : '';
+}
+
 async function init() {
+  initSignIn();
+  loadHealth();
+  try { S.session = await api('/api/session'); } catch { S.session = { signed_in: false }; }
+  if (!S.session.signed_in) { showSignIn(); return; }
+  showPortal();
   try { S.vocab = await api('/api/vocab'); } catch { /* keep defaults */ }
   try { S.customers = await api('/api/customers'); } catch (e) { setStatus(e.message, true); }
-  renderCustomerSelect();
-  renderExamples();
-  initRegisterForm();
   $('#explore-date').value = nextWeekday();
-
-  $('#customer').addEventListener('change', () => { storage.set('aimo.customer', $('#customer').value); renderTrustCard(); markDirty(true); });
-  $('#request-text').addEventListener('input', () => markDirty(true));
-  $('#request-form').addEventListener('submit', (e) => { e.preventDefault(); runRequest(); });
-  $('#request-text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runRequest(); });
   $('#explore-form').addEventListener('submit', (e) => { e.preventDefault(); S.explore.category = ''; runExplore(); });
-  $('#reviewer').addEventListener('change', () => storage.set('aimo.reviewer', $('#reviewer').value.trim()));
-  $('#reset-demo').addEventListener('click', async () => {
-    if (!confirm('Reset the demo? Customers return to the seed data; orders and the audit trail are cleared.')) return;
-    await api('/api/admin/reset', { method: 'POST' });
-    S.customers = await api('/api/customers');
-    newRequest();
+
+  if (S.session.role === 'buyer') {
+    renderCustomer();
+    renderExamples();
+    $('#request-text').addEventListener('input', () => markDirty(true));
+    $('#request-form').addEventListener('submit', (e) => { e.preventDefault(); runRequest(); });
+    $('#request-text').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runRequest(); });
+    updateOrderControls();
+  } else {
+    initRegisterForm();
+    $('#reset-demo').addEventListener('click', async () => {
+      if (!confirm('Reset the demo? Customers return to the seed data; orders and the audit trail are cleared.')) return;
+      try {
+        await api('/api/admin/reset', { method: 'POST' });
+        S.customers = await api('/api/customers');
+      } catch (e) { alert(e.message); return; }
+      refreshReviewCount();
+      route();
+    });
     refreshReviewCount();
-    route();
-  });
+  }
   window.addEventListener('hashchange', route);
   window.addEventListener('scroll', hideTip, { passive: true });
   route();
-  updateOrderControls();
-  loadHealth();
-  refreshReviewCount();
 }
 
 init();

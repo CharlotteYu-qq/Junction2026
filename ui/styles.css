@@ -107,7 +107,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 label, .label { display: block; font-weight: 700; margin-bottom: 6px; font-size: 15px; }
 .field { margin-bottom: 16px; }
 .field-inline { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; margin: 0; }
-input[type=text], input[type=search], input[type=number], input[type=date], select, textarea {
+input[type=text], input[type=search], input[type=number], input[type=date], input[type=password], select, textarea {
   border: 1px solid var(--Aimo-grey); border-radius: var(--radius); background: #fff; padding: 0 12px; height: 44px; min-width: 0;
 }
 textarea { width: 100%; height: auto; padding: 12px; resize: vertical; line-height: 1.4; font-size: 17px; }
@@ -120,7 +120,22 @@ select { padding-right: 28px; }
 .request-panel { box-shadow: var(--shadow); background: #fff; margin-top: 8px; }
 .form-row { display: grid; grid-template-columns: minmax(220px, 320px) 1fr; gap: 16px; margin-bottom: 16px; align-items: start; }
 .field-customer select { width: 100%; }
+.customer-fixed { min-height: 44px; display: flex; align-items: center; font-weight: 700; font-size: 17px; color: var(--Aimo-petrol); }
 @media (max-width: 760px) { .form-row { grid-template-columns: 1fr; } }
+
+/* ---------------------------------------------------------------- sign-in & session */
+.signin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 8px 0 48px; }
+@media (max-width: 860px) { .signin-grid { grid-template-columns: 1fr; } }
+.signin-card { background: #fff; box-shadow: var(--shadow); display: flex; flex-direction: column; }
+.signin-card h2 { font-size: 26px; margin-bottom: 8px; }
+.signin-card > .muted { margin: 0 0 20px; }
+.signin-card .field input, .signin-card .field select { width: 100%; }
+.signin-card .btn { align-self: flex-start; margin-top: auto; }
+.signin-card-valio { border-top-color: var(--Aimo-summer); }
+.signin-error { margin: 12px 0 0; }
+.signin-note { background: var(--status-warning-bg); border-radius: var(--radius); padding: 10px 14px; font-size: 14px; margin: 8px 0 16px; }
+.session-box { display: flex; align-items: center; gap: 12px; font-size: 14px; flex-wrap: wrap; }
+.cell-line { display: block; }
 .trust-card { background: var(--Aimo-white-cold); border-radius: var(--radius); padding: 10px 14px; min-height: 44px; font-size: 14px; }
 .trust-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .trust-reasons { margin: 6px 0 0; padding-left: 18px; color: var(--text-secondary); }

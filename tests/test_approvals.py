@@ -12,10 +12,13 @@ from gateway.config import TZ
 from gateway.planner import verify_offer
 from gateway.store import Store
 from trust.audit import AuditLog
+from trust.auth import Principal
 from trust.customers import CustomerRegistry
 from trust.policy import evaluate
 from trust.signing import Signer, content_hash
 from contracts.models import Offer, OfferItem, Order, Candidate, PriceInfo, Availability, ParsedRequest, RequestItem
+
+STAFF = Principal(role='valio', name='Reviewer')
 
 
 class ApprovalTests(unittest.TestCase):
@@ -52,7 +55,7 @@ class ApprovalTests(unittest.TestCase):
     def test_over_limit_order_can_be_approved(self):
         order, customer = self.pending()
         before = customer.past_orders
-        result = gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='approve', reviewer='Reviewer'))
+        result = gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='approve'), STAFF)
         self.assertEqual(result['status'], 'placed')
         self.assertEqual(customer.past_orders, before + 1)
 
@@ -62,7 +65,7 @@ class ApprovalTests(unittest.TestCase):
                 order, customer = self.pending(**kwargs)
                 before = customer.past_orders
                 with self.assertRaises(HTTPException) as error:
-                    gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='approve', reviewer='Reviewer'))
+                    gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='approve'), STAFF)
                 self.assertEqual(error.exception.status_code, 409)
                 self.assertEqual(order.status, 'pending_approval')
                 self.assertIsNone(order.reviewer)
@@ -70,20 +73,20 @@ class ApprovalTests(unittest.TestCase):
 
     def test_rejecting_expired_order_remains_possible(self):
         order, _ = self.pending(expired=True)
-        result = gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='reject', reviewer='Reviewer'))
+        result = gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='reject'), STAFF)
         self.assertEqual(result['status'], 'rejected')
 
     def test_blank_reviewer_cannot_decide(self):
         order, _ = self.pending()
         with self.assertRaises(HTTPException):
-            gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='approve', reviewer='   '))
+            gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='approve'), Principal(role='valio', name='   '))
         self.assertEqual(order.status, 'pending_approval')
 
     def test_signed_snapshot_does_not_allow_changed_price(self):
         order, _ = self.pending()
         gateway_app.S.store.offers[order.offer_id].items[0].candidates[0].line_total = 999
         with self.assertRaises(HTTPException):
-            gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='approve', reviewer='Reviewer'))
+            gateway_app.decide_order(order.id, gateway_app.DecisionIn(decision='approve'), STAFF)
 
 
 if __name__ == '__main__':

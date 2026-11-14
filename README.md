@@ -15,15 +15,18 @@ python -m uvicorn gateway.app:app --reload --port 8000
 
 Open <http://127.0.0.1:8000>. The API docs are at <http://127.0.0.1:8000/docs>. The first start builds a slim catalog index, which takes a few seconds.
 
-| Page | What it shows |
-|---|---|
-| **Order** | Type a need in plain words (English or basic Finnish). The agent shows what it understood (you can edit it), the steps it ran, ranked options per item with live prices and stock, and the decision: placed automatically, sent for approval, or blocked |
-| **Review queue** | Orders that need a person, each with the reasons, the order lines, the request and the agent's rationale. Approving can also verify a new customer |
-| **Customers** | The whitelist: trust status, Y-tunnus checksum, auto-approval limit and hard allergen rules. You can register a new customer |
-| **Audit trail** | Every step by the customer, agent, policy and people, in plain language and hash-chained |
-| **Explore** | Catalog explorer with label/diet filters and a carbon-footprint-by-product-group chart that you can click to filter |
+The site opens on a sign-in page with two portals. Locally, with no `BUYER_PASSWORD` / `VALIO_PASSWORD` in `.env`, signing in needs no password.
 
-Use the example buttons on the Order page for the demo scenarios. **Reset demo data** is in the footer.
+| Portal | Page | What it shows |
+|---|---|---|
+| Buyer | **Order** | Type a need in plain words (English or basic Finnish). The agent shows what it understood (you can edit it), the steps it ran, ranked options per item with live prices and stock, and the decision: placed automatically, sent to Valio Aimo for approval, or blocked |
+| Buyer | **My orders** | Your orders and what happened to each: placed automatically, waiting for Valio Aimo, or decided by a named person |
+| Valio Aimo | **Review queue** | Orders that need a person, each with the reasons, the order lines, the request and the agent's rationale. Approving can also verify a new customer |
+| Valio Aimo | **Customers** | The whitelist: trust status, Y-tunnus checksum, auto-approval limit and hard allergen rules. You can register a new customer |
+| Valio Aimo | **Audit trail** | Every step by the customer, agent, policy and people, in plain language and hash-chained |
+| Both | **Explore** | Catalog explorer with label/diet filters and a carbon-footprint-by-product-group chart that you can click to filter |
+
+Sign in as a buyer and use the example buttons on the Order page for the demo scenarios. **Reset demo data** is in the footer of the Valio Aimo admin.
 
 **Deploying** to a Verda CPU instance takes one script: see [deploy/README.md](deploy/README.md).
 
@@ -141,7 +144,7 @@ Next step: expose the same operations as **MCP tools**, so LLM agents can call t
 
 ## What stays private
 
-The gateway exposes only selected data. It never exposes purchase prices, margins, supplier terms, other customers' data or the internal roadmap. The backend API key stays on the server. The deployed MVP uses a shared demo login; scoped agent credentials and buyer/reviewer role separation are production next steps.
+The gateway exposes only selected data. It never exposes purchase prices, margins, supplier terms, other customers' data or the internal roadmap. The backend API key stays on the server. The web app has two portals, checked on the server: buyers order and see only their own orders, and Valio Aimo staff review exceptions and manage customers. Per-user accounts and scoped, revocable agent credentials are the next steps.
 
 ## Repository layout
 

@@ -40,8 +40,11 @@ fi
 echo "==> Running setup on the server"
 "${SSH[@]}" "DOMAIN='$DOMAIN' bash $APP_DIR/deploy/setup.sh"
 
-conf="$("${SSH[@]}" "grep -E '^(DOMAIN|DEMO_USER|DEMO_PASSWORD)=' $APP_DIR/.env")"
+conf="$("${SSH[@]}" "grep -E '^(DOMAIN|BUYER_PASSWORD|DEMO_PASSWORD|VALIO_PASSWORD)=' $APP_DIR/.env" || true)"
 site_domain="$(printf '%s\n' "$conf" | sed -n 's/^DOMAIN=//p' | tail -n1)"
+buyer_pw="$(printf '%s\n' "$conf" | sed -n 's/^BUYER_PASSWORD=//p' | tail -n1)"
+[ -n "$buyer_pw" ] || buyer_pw="$(printf '%s\n' "$conf" | sed -n 's/^DEMO_PASSWORD=//p' | tail -n1)"
 echo
-if [ -n "$site_domain" ]; then echo "Site:     https://$site_domain/"; else echo "Site:     http://$HOST/"; fi
-printf '%s\n' "$conf" | sed -n 's/^DEMO_USER=/Login:    /p; s/^DEMO_PASSWORD=/Password: /p'
+if [ -n "$site_domain" ]; then echo "Site:            https://$site_domain/"; else echo "Site:            http://$HOST/"; fi
+echo "Buyer password:  $buyer_pw"
+printf '%s\n' "$conf" | sed -n 's/^VALIO_PASSWORD=/Valio password:  /p'
