@@ -758,5 +758,15 @@ async def catalog_quote(body: QuoteIn, who: Principal = Depends(signed_in)):
     }
 
 
+class UIFiles(StaticFiles):
+    """The web UI files, marked no-cache: browsers check for a newer version on every load (an unchanged file is a
+    small 304), so a deploy shows at once instead of after the browser's own guess at how long to keep the old one."""
+
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # The web UI. Mounted last so every /api route above takes precedence.
-app.mount("/", StaticFiles(directory=settings.ui_dir, html=True), name="ui")
+app.mount("/", UIFiles(directory=settings.ui_dir, html=True), name="ui")
