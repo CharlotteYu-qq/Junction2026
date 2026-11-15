@@ -78,6 +78,12 @@ class PortalTests(unittest.TestCase):
         self.assertTrue(session['password_required'])
         self.assertEqual({c['id'] for c in session['customers']}, {'C-1001', 'C-1002', 'C-2001'})
 
+    def test_password_is_shared_only_on_a_public_demo(self):
+        for show, hint in ((False, None), (True, 'buyer-pw')):
+            with self.subTest(show=show), patch.object(gateway_app, 'settings',
+                                                       replace(gateway_app.settings, show_buyer_password=show)):
+                self.assertEqual(self.client.get('/api/session').json()['password_hint'], hint)
+
     def test_wrong_password_is_rejected(self):
         self.assertEqual(self.login(customer_id='C-1001', password='nope').status_code, 401)
         self.assertEqual(self.client.get('/api/orders').status_code, 401)

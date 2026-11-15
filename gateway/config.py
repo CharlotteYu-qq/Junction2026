@@ -25,6 +25,8 @@ class Settings:
     # Sign-in password for the buyer portal (falls back to DEMO_PASSWORD from older deployments).
     # Without one (local development), signing in needs no password.
     buyer_password: str = os.getenv("BUYER_PASSWORD", "") or os.getenv("DEMO_PASSWORD", "")
+    # Public demo: show the password on the sign-in page (greyed in the field) so visitors can try the portal.
+    show_buyer_password: bool = os.getenv("SHOW_BUYER_PASSWORD", "").strip().lower() in ("1", "true", "yes")
     valio_dir: Path = field(default=ROOT / "data" / "valio")
     runtime_dir: Path = field(default=ROOT / "data" / "runtime")
     ui_dir: Path = field(default=ROOT / "ui")
