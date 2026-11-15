@@ -90,7 +90,8 @@
               </div>
               <div class="field"><label for="signin-customer">Company</label><select id="signin-customer"></select></div>
               <div class="field signin-password"><label for="signin-buyer-password">Password</label>
-                <input id="signin-buyer-password" type="password" autocomplete="current-password"></div>
+                <input id="signin-buyer-password" type="password" autocomplete="current-password" aria-describedby="signin-password-hint">
+                <span id="signin-password-hint" class="hint muted" hidden></span></div>
               <button class="btn btn-primary" type="submit">Sign in as buyer <span aria-hidden="true">→</span></button>
               <p class="signin-error bad small" role="alert" hidden></p>
               <p class="home-login-footnote"><span aria-hidden="true">✓</span> Your order stays within your organisation's approval limits.</p>

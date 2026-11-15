@@ -1401,6 +1401,11 @@ function renderSignIn(message = '') {
   sel.replaceChildren(...customers.map((c) => h('option', { value: c.id, text: c.name })));
   if (customers.some((c) => c.id === keep)) sel.value = keep;
   document.querySelectorAll('.signin-password').forEach((el) => { el.hidden = s.password_required === false; });
+  // Public demo: the server shares the password, shown greyed in the field and spelled out below it.
+  const hint = s.password_required !== false && s.password_hint ? s.password_hint : '';
+  $('#signin-buyer-password').placeholder = hint;
+  $('#signin-password-hint').textContent = hint ? `Demo access: the password is ${hint}` : '';
+  $('#signin-password-hint').hidden = !hint;
   const note = message || (s.password_required === false ? 'Local development: no password is set on this server, so signing in needs none.' : '');
   $('#signin-status').textContent = note;
   $('#signin-status').hidden = !note;

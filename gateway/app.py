@@ -126,6 +126,8 @@ def get_session(request: Request):
         "name": who.name if who else None,
         "customer_id": who.customer_id if who else None,
         "password_required": _passwords_required(),
+        # Only on a public demo (SHOW_BUYER_PASSWORD): the sign-in page shows it so visitors can sign in.
+        "password_hint": settings.buyer_password if _passwords_required() and settings.show_buyer_password else None,
         "customers": [{"id": c.id, "name": c.name} for c in S.customers.all()],
     }
 

@@ -82,6 +82,8 @@ grep _PASSWORD /opt/aimo-gateway/.env   # sign-in passwords
 ```
 
 To change the password, edit `BUYER_PASSWORD` in `/opt/aimo-gateway/.env` and run `systemctl restart aimo-gateway`.
+For a public demo, also set `SHOW_BUYER_PASSWORD=1`: the sign-in page then shows the password (greyed in the
+field and spelled out below it) so anyone can try the portal.
 
 ## Notes
 
