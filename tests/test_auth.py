@@ -84,6 +84,14 @@ class PortalTests(unittest.TestCase):
                                                        replace(gateway_app.settings, show_buyer_password=show)):
                 self.assertEqual(self.client.get('/api/session').json()['password_hint'], hint)
 
+    def test_web_ui_is_checked_for_a_new_version_on_every_load(self):
+        for path in ('/', '/app.js', '/styles.css'):
+            with self.subTest(path=path):
+                first = self.client.get(path)
+                self.assertEqual((first.status_code, first.headers['cache-control']), (200, 'no-cache'))
+                again = self.client.get(path, headers={'If-None-Match': first.headers['etag']})
+                self.assertEqual(again.status_code, 304)  # unchanged: nothing downloaded again
+
     def test_wrong_password_is_rejected(self):
         self.assertEqual(self.login(customer_id='C-1001', password='nope').status_code, 401)
         self.assertEqual(self.client.get('/api/orders').status_code, 401)
